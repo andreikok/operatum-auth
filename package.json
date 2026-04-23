@@ -1,0 +1,23 @@
+{
+  "name": "@operatum/auth",
+  "version": "0.1.0",
+  "description": "Verify Operatum-issued JWTs in apps built on the Operatum platform. Zero runtime dependencies.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": ["operatum", "auth", "jwt", "jwks", "express"],
+  "author": "Operatum",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
