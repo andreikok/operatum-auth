@@ -80,6 +80,43 @@ the middleware looks in this order:
 3. **`?operatum_token=<token>` query string** — initial landing only.
    The app should immediately redirect to the same URL without it.
 
+### Fragment handoff (recommended for SPA apps)
+
+The Operatum SPA opens your app with the token in the URL fragment:
+
+```
+https://your-app.example.com/#operatum_token=eyJhbGci...
+```
+
+Fragments are never sent to servers, so the raw token stays out of
+access logs. Mount the handoff endpoint and read the fragment on first
+load:
+
+```js
+// Server (once, during startup)
+auth.mountHandoff(app);   // POST /_operatum/auth/handoff
+
+// Client (index.html or your SPA entry)
+const m = location.hash.match(/(?:^|&)operatum_token=([^&]+)/);
+if (m) {
+  await fetch('/_operatum/auth/handoff', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ token: decodeURIComponent(m[1]) }),
+  });
+  history.replaceState(null, '', location.pathname + location.search);
+}
+```
+
+The handoff endpoint verifies the token, sets an httpOnly
+`operatum.session` cookie, and replies `{ ok: true, expires_at }`.
+From there, every request carries the cookie and the middleware
+populates `req.operatum` as usual.
+
+API-only apps (no browser frontend) skip the handoff and rely on the
+SPA sending `Authorization: Bearer <token>` on each request.
+
 ## Behavior on auth failure
 
 - Browser requests (`Accept: text/html`): redirect to

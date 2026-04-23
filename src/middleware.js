@@ -119,5 +119,72 @@ export function createOperatumAuth(opts) {
     };
   }
 
-  return { middleware, requirePerm, verify, jwks };
+  /**
+   * Mount POST /_operatum/auth/handoff on the app. The Operatum SPA
+   * opens the app with `#operatum_token=<jwt>` in the URL fragment;
+   * the app's client-side JS reads the fragment and POSTs
+   *
+   *   fetch('/_operatum/auth/handoff', {
+   *     method: 'POST',
+   *     headers: { 'Content-Type': 'application/json' },
+   *     credentials: 'include',
+   *     body: JSON.stringify({ token })
+   *   })
+   *
+   * on first load. This endpoint verifies the token, sets an httpOnly
+   * `operatum.session` cookie scoped to the app's domain, and returns
+   * `{ ok: true, expires_at }` so the SPA can wipe the fragment and
+   * start behaving normally.
+   *
+   * Separating the fragment-handoff into a dedicated endpoint keeps the
+   * raw token out of any other logs/proxies on the app's side — it only
+   * ever appears in one POST body, which Express doesn't log by default.
+   *
+   * @param {import('express').Application | import('express').Router} app
+   * @param {object} [opts]
+   * @param {string} [opts.path='/_operatum/auth/handoff']
+   * @param {boolean} [opts.cookieSecure=true]   - Set Secure on the cookie
+   * @param {string} [opts.cookieSameSite='lax'] - 'lax' | 'strict' | 'none'
+   */
+  function mountHandoff(app, opts = {}) {
+    const {
+      path = '/_operatum/auth/handoff',
+      cookieSecure = true,
+      cookieSameSite = 'lax',
+    } = opts;
+
+    app.post(path, async (req, res) => {
+      try {
+        // Accept both Express's json-parsed body and a raw string (tolerant
+        // for apps that haven't wired `express.json()` yet).
+        let token = null;
+        if (req.body && typeof req.body === 'object' && typeof req.body.token === 'string') {
+          token = req.body.token;
+        } else if (typeof req.body === 'string') {
+          try { token = JSON.parse(req.body).token; } catch { /* fall through */ }
+        }
+        if (!token) {
+          return res.status(400).json({ ok: false, error: 'missing_token' });
+        }
+
+        const payload = await verify(token);
+        const maxAgeMs = Math.max(0, (payload.exp * 1000) - Date.now());
+        const cookieParts = [
+          `${cookieName}=${encodeURIComponent(token)}`,
+          'Path=/',
+          'HttpOnly',
+          `SameSite=${cookieSameSite}`,
+          `Max-Age=${Math.floor(maxAgeMs / 1000)}`,
+        ];
+        if (cookieSecure) cookieParts.push('Secure');
+        res.setHeader('Set-Cookie', cookieParts.join('; '));
+        res.json({ ok: true, expires_at: payload.exp });
+      } catch (err) {
+        const code = (err && err.code) || 'auth_failed';
+        res.status(401).json({ ok: false, error: 'handoff_failed', reason: code });
+      }
+    });
+  }
+
+  return { middleware, requirePerm, verify, jwks, mountHandoff };
 }
