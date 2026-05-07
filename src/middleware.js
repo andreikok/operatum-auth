@@ -1,6 +1,15 @@
 /**
- * middleware.js — Express middleware that verifies Operatum JWTs and
- * populates req.operatum with the caller's identity + grants.
+ * middleware.js — framework-agnostic middleware that verifies
+ * Operatum JWTs and populates req.operatum with the caller's
+ * identity + grants. Works with both Express (req.get / res.status
+ * / res.redirect) and Fastify (req.headers / reply.code / reply.send
+ * / reply.redirect) — the helpers below detect which framework's
+ * shape is on the request and call the right APIs.
+ *
+ * Live-reported on 2026-05-07: Fastify apps crashed at
+ * `req.get('host')` because that's an Express-only method; a Fastify
+ * `request` doesn't have it. The agent saw `fetch failed` because
+ * the middleware threw → handler chain aborted → empty reply.
  *
  * Token sources (first match wins):
  *   1. Authorization: Bearer <token>
@@ -17,6 +26,51 @@
 import { JwksCache } from './jwks-cache.js';
 import { verifyToken, TokenError } from './jwt-verify.js';
 
+// ── Framework adapters ────────────────────────────────────────────
+//
+// Express:  req.get(name) / req.protocol / req.originalUrl
+//           res.status(n).json(o)   /   res.redirect(url)
+// Fastify:  req.headers[name]      / req.protocol / req.url
+//           reply.code(n).send(o)  /   reply.redirect(url)
+//
+// The middleware must work with either; these helpers normalise
+// the lookup so the rest of the file doesn't branch.
+
+function getHeader(req, name) {
+  // Express's req.get() is case-insensitive; Fastify exposes the
+  // already-lowercased headers map. Try req.get() first, then fall
+  // through to the headers map — partial Express mocks that don't
+  // implement get() for every name (and Fastify, which lacks get()
+  // entirely) get the same answer.
+  if (typeof req.get === 'function') {
+    const v = req.get(name);
+    if (v != null) return v;
+  }
+  const h = req.headers || {};
+  return h[name] || h[name.toLowerCase()] || null;
+}
+
+function getOriginalUrl(req) {
+  return req.originalUrl || req.url || '/';
+}
+
+function sendJson(res, status, body) {
+  // Fastify exposes reply.code()+reply.send(); Express exposes
+  // res.status()+res.json(). reply.send() of a plain object emits
+  // application/json automatically.
+  if (typeof res.code === 'function' && typeof res.send === 'function') {
+    return res.code(status).send(body);
+  }
+  return res.status(status).json(body);
+}
+
+function sendRedirect(res, url) {
+  // Both frameworks expose .redirect(url), but Fastify wants
+  // reply.redirect(url, statusCode?) and ignores the body. Stick to
+  // the single-arg form so it works on both.
+  return res.redirect(url);
+}
+
 function readCookie(cookieHeader, name) {
   if (!cookieHeader) return null;
   for (const part of cookieHeader.split(';')) {
@@ -27,18 +81,18 @@ function readCookie(cookieHeader, name) {
 }
 
 function extractToken(req, cookieName) {
-  const auth = req.headers.authorization || req.headers.Authorization;
+  const auth = getHeader(req, 'authorization');
   if (auth && /^Bearer\s+/i.test(auth)) return auth.replace(/^Bearer\s+/i, '').trim();
-  const fromCookie = readCookie(req.headers.cookie, cookieName);
+  const fromCookie = readCookie(getHeader(req, 'cookie'), cookieName);
   if (fromCookie) return fromCookie;
   if (req.query && typeof req.query.operatum_token === 'string') return req.query.operatum_token;
   return null;
 }
 
 function wantsJson(req) {
-  const accept = (req.headers.accept || '').toLowerCase();
+  const accept = (getHeader(req, 'accept') || '').toLowerCase();
   if (accept.includes('application/json')) return true;
-  if ((req.headers['x-requested-with'] || '').toLowerCase() === 'xmlhttprequest') return true;
+  if ((getHeader(req, 'x-requested-with') || '').toLowerCase() === 'xmlhttprequest') return true;
   return false;
 }
 
@@ -73,11 +127,13 @@ export function createOperatumAuth(opts) {
 
   function denyUnauthenticated(req, res, reason) {
     if (wantsJson(req) || !loginUrl) {
-      return res.status(401).json({ ok: false, error: 'unauthenticated', reason });
+      return sendJson(res, 401, { ok: false, error: 'unauthenticated', reason });
     }
-    const fullUrl = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+    const protocol = req.protocol || 'http';
+    const host = getHeader(req, 'host') || '';
+    const fullUrl = `${protocol}://${host}${getOriginalUrl(req)}`;
     const sep = loginUrl.includes('?') ? '&' : '?';
-    return res.redirect(`${loginUrl}${sep}next=${encodeURIComponent(fullUrl)}`);
+    return sendRedirect(res, `${loginUrl}${sep}next=${encodeURIComponent(fullUrl)}`);
   }
 
   function middleware() {
@@ -98,7 +154,7 @@ export function createOperatumAuth(opts) {
         return next();
       } catch (err) {
         if (err instanceof TokenError) return denyUnauthenticated(req, res, err.code);
-        return res.status(500).json({ ok: false, error: 'auth_failed' });
+        return sendJson(res, 500, { ok: false, error: 'auth_failed' });
       }
     };
   }
@@ -110,10 +166,10 @@ export function createOperatumAuth(opts) {
   function requirePerm(perm) {
     return (req, res, next) => {
       if (!req.operatum) {
-        return res.status(401).json({ ok: false, error: 'unauthenticated' });
+        return sendJson(res, 401, { ok: false, error: 'unauthenticated' });
       }
       if (!req.operatum.perms.includes(perm)) {
-        return res.status(403).json({ ok: false, error: `missing '${perm}' permission` });
+        return sendJson(res, 403, { ok: false, error: `missing '${perm}' permission` });
       }
       return next();
     };
@@ -164,7 +220,7 @@ export function createOperatumAuth(opts) {
           try { token = JSON.parse(req.body).token; } catch { /* fall through */ }
         }
         if (!token) {
-          return res.status(400).json({ ok: false, error: 'missing_token' });
+          return sendJson(res, 400, { ok: false, error: 'missing_token' });
         }
 
         const payload = await verify(token);
@@ -177,11 +233,19 @@ export function createOperatumAuth(opts) {
           `Max-Age=${Math.floor(maxAgeMs / 1000)}`,
         ];
         if (cookieSecure) cookieParts.push('Secure');
-        res.setHeader('Set-Cookie', cookieParts.join('; '));
-        res.json({ ok: true, expires_at: payload.exp });
+        // Both Express's res.setHeader and Fastify's reply.header /
+        // raw.setHeader work; raw is the most universal escape.
+        if (typeof res.header === 'function') {
+          res.header('Set-Cookie', cookieParts.join('; '));
+        } else if (res.raw && typeof res.raw.setHeader === 'function') {
+          res.raw.setHeader('Set-Cookie', cookieParts.join('; '));
+        } else {
+          res.setHeader('Set-Cookie', cookieParts.join('; '));
+        }
+        sendJson(res, 200, { ok: true, expires_at: payload.exp });
       } catch (err) {
         const code = (err && err.code) || 'auth_failed';
-        res.status(401).json({ ok: false, error: 'handoff_failed', reason: code });
+        sendJson(res, 401, { ok: false, error: 'handoff_failed', reason: code });
       }
     });
   }
