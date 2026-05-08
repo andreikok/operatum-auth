@@ -43,12 +43,18 @@ function mockReq(overrides = {}) {
   };
 }
 function mockRes() {
-  const state = { status: 200, headers: {}, body: null, redirectedTo: null };
+  const state = {
+    status: 200, headers: {}, body: null, redirectedTo: null,
+    contentType: null,
+  };
   return {
     status(code) { state.status = code; return this; },
     json(body) { state.body = body; return this; },
     redirect(url) { state.redirectedTo = url; state.status = 302; return this; },
+    type(t) { state.contentType = t; return this; },
+    send(body) { state.body = body; return this; },
     set(k, v) { state.headers[k] = v; return this; },
+    setHeader(k, v) { state.headers[k] = v; return this; },
     get(k) { return state.headers[k]; },
     _state: state,
   };
@@ -85,7 +91,7 @@ test('middleware populates req.operatum on a valid Bearer token', async () => {
   });
 });
 
-test('middleware redirects browser requests to loginUrl with next=', async () => {
+test('middleware serves bootstrap HTML (not 302) for unauthenticated browser requests', async () => {
   const kp = mintKeypair();
   const auth = createOperatumAuth({
     jwksUri: 'x',
@@ -96,9 +102,73 @@ test('middleware redirects browser requests to loginUrl with next=', async () =>
   const req = mockReq({ originalUrl: '/dashboard?foo=1', headers: { accept: 'text/html' } });
   const res = mockRes();
   await auth.middleware()(req, res, () => { throw new Error('next should not be called'); });
-  assert.equal(res._state.status, 302);
-  assert.ok(res._state.redirectedTo.startsWith('https://operatum.example/login?next='));
-  assert.ok(res._state.redirectedTo.includes(encodeURIComponent('https://app.example/dashboard?foo=1')));
+  // Bootstrap is a 200 HTML, not a 302 — that's the whole point of
+  // the fix. A 302 would race the fragment handoff (browser carries
+  // the fragment forward, no JS ever runs to consume it).
+  assert.equal(res._state.status, 200);
+  assert.equal(res._state.contentType, 'html');
+  assert.equal(res._state.redirectedTo, null);
+  // The bootstrap embeds the SSO URL as a fallback for the no-fragment
+  // case — so the redirect target still has to be reachable from
+  // the page. Pin both the host and the next= round-trip.
+  assert.match(res._state.body, /https:\/\/operatum\.example\/login\?next=/);
+  assert.ok(res._state.body.includes(encodeURIComponent('https://app.example/dashboard?foo=1')));
+});
+
+test('bootstrap HTML reads the fragment and POSTs to the handoff endpoint', async () => {
+  const kp = mintKeypair();
+  const auth = createOperatumAuth({
+    jwksUri: 'x',
+    expectedAudience: 'operatum-app:b',
+    loginUrl: 'https://operatum.example/login',
+    fetchImpl: jwksFetch([kp.jwk]),
+  });
+  const req = mockReq({ headers: { accept: 'text/html' } });
+  const res = mockRes();
+  await auth.middleware()(req, res, () => { throw new Error('next should not be called'); });
+  const html = res._state.body;
+  // The script must read window.location.hash for operatum_token=...
+  assert.match(html, /location\.hash/);
+  assert.match(html, /operatum_token=/);
+  // It POSTs to the handoff endpoint with credentials so the
+  // Set-Cookie response is honored cross-origin (gateway → app).
+  assert.match(html, /\/_operatum\/auth\/handoff/);
+  assert.match(html, /credentials:\s*'include'/);
+  assert.match(html, /method:\s*'POST'/);
+  // After successful handoff it MUST strip the fragment from the URL
+  // and reload — that's what unblocks the next request to be
+  // authenticated by the cookie. Without the reload the cookie is
+  // set but the current page never re-runs the middleware.
+  assert.match(html, /history\.replaceState/);
+  assert.match(html, /location\.reload/);
+  // No-fragment branch: location.replace to the SSO URL. Pin the
+  // fallback so a future trim doesn't quietly drop it.
+  assert.match(html, /location\.replace/);
+});
+
+test('bootstrap HTML escapes the SSO URL safely (no script-context break)', async () => {
+  const kp = mintKeypair();
+  const auth = createOperatumAuth({
+    jwksUri: 'x',
+    expectedAudience: 'operatum-app:b',
+    loginUrl: 'https://operatum.example/login',
+    fetchImpl: jwksFetch([kp.jwk]),
+  });
+  // A path containing characters that would break naive interpolation
+  // (apostrophe, angle brackets) must round-trip safely. JSON.stringify
+  // is the contract we rely on — pin that the URL is wrapped in
+  // a double-quoted JSON literal, not concatenated into the script
+  // body raw.
+  const req = mockReq({
+    originalUrl: '/items?q=</script><script>alert(1)</script>',
+    headers: { accept: 'text/html' },
+  });
+  const res = mockRes();
+  await auth.middleware()(req, res, () => { throw new Error('next should not be called'); });
+  // The dangerous chunk must NOT appear unencoded in the response
+  // (which would let it execute as a sibling script).
+  assert.ok(!res._state.body.includes('</script><script>alert(1)</script>'),
+    'dangerous URL chars must be encoded, not pasted raw into the script');
 });
 
 test('middleware returns 401 JSON for API-style requests', async () => {
