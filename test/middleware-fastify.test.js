@@ -108,7 +108,7 @@ test('middleware returns 401 JSON via reply.code()+send() for Fastify API reques
   assert.equal(reply._state.body.reason, 'no_token');
 });
 
-test('middleware redirects Fastify browser requests via reply.redirect()', async () => {
+test('middleware serves bootstrap HTML to Fastify browser requests via reply.code()+send()', async () => {
   const kp = mintKeypair();
   const auth = createOperatumAuth({
     jwksUri: 'x',
@@ -122,12 +122,19 @@ test('middleware redirects Fastify browser requests via reply.redirect()', async
   });
   const reply = fastifyReply();
   await auth.middleware()(req, reply, () => { throw new Error('next should not be called'); });
-  // The denyUnauthenticated path computes fullUrl from req.protocol +
-  // host header + req.url (no .originalUrl on Fastify).
-  assert.equal(reply._state.status, 302);
-  assert.ok(reply._state.redirectedTo.startsWith('https://operatum.example/login?next='));
-  assert.ok(reply._state.redirectedTo.includes(encodeURIComponent('https://app.example/dashboard?foo=1')),
-    `Fastify redirect must include the request's full URL — got ${reply._state.redirectedTo}`);
+  // After the bootstrap-HTML fix, the deny path returns 200 HTML
+  // (not 302) so the embedded script can consume any fragment-token
+  // before the SSO fallback redirect fires. The response shape must
+  // hit Fastify's reply.code()+send() (not res.status()+res.send()).
+  assert.equal(reply._state.status, 200);
+  assert.equal(reply._state.headers['Content-Type'], 'text/html; charset=utf-8',
+    'Fastify path uses reply.header() — content-type must be set there');
+  assert.equal(reply._state.redirectedTo, null);
+  // The fallback SSO URL still has to be embedded in the page (used
+  // when there's no fragment-token to consume).
+  assert.match(reply._state.body, /https:\/\/operatum\.example\/login\?next=/);
+  assert.ok(reply._state.body.includes(encodeURIComponent('https://app.example/dashboard?foo=1')),
+    `Fastify bootstrap must include the request's full URL — got ${reply._state.body.slice(0, 200)}`);
 });
 
 test('requirePerm denies via reply.code()+send() on Fastify', async () => {
