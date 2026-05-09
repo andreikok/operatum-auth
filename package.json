@@ -1,7 +1,7 @@
 {
   "name": "@operatum/auth",
-  "version": "0.1.0",
-  "description": "Verify Operatum-issued JWTs in apps built on the Operatum platform. Zero runtime dependencies.",
+  "version": "0.2.0",
+  "description": "Verify Operatum-issued JWTs OR read X-Operatum-* reverse-proxy headers in apps built on the Operatum platform. Zero runtime dependencies.",
   "type": "module",
   "main": "src/index.js",
   "exports": {
