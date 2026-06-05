@@ -65,6 +65,9 @@ export async function verifyToken(token, {
   if (!expectedAudience && !audiencePrefix) {
     throw new TokenError('no expectedAudience / audiencePrefix configured', 'misconfigured');
   }
+  if (expectedAudience && audiencePrefix) {
+    throw new TokenError('pass exactly one of expectedAudience / audiencePrefix', 'misconfigured');
+  }
 
   const parts = token.split('.');
   if (parts.length !== 3) throw new TokenError('not a JWT', 'malformed');
