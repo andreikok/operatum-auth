@@ -52,6 +52,9 @@
  * otherwise would mask infrastructure bugs.
  */
 
+import { JwksCache } from './jwks-cache.js';
+import { verifyDepToken, parseDepScope, parseDepToolScope } from './service-mode.js';
+
 const ROLES = new Set(['admin', 'builder', 'reviewer', 'viewer']);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -134,41 +137,72 @@ function sendJson(res, status, body) {
  *
  * @returns {{middleware, requirePerm, verify}}
  */
-export function createOperatumAuthFromHeaders() {
+export function createOperatumAuthFromHeaders(opts = {}) {
+  // Optional cross-app dependency-token path. A dep call goes container→
+  // container (host.docker.internal:<port>) carrying only a Bearer service
+  // token — no X-Operatum-* identity headers — so the producer must verify it
+  // itself. Activated only when this app's build id + a JWKS are resolvable
+  // (from opts or platform-injected env); otherwise this is pure header mode
+  // (backward compatible — existing zero-config callers are unaffected).
+  const svc = resolveServiceConfig(opts);
+
   function middleware() {
-    return (req, res, next) => {
+    return async (req, res, next) => {
       // For Express, headers are normalised lowercase on req.headers.
       // For Fastify too. We pass the headers object (not req) into
       // the read because the read is the protocol contract — nothing
       // framework-specific about it.
       const identity = readOperatumHeaders(req.headers ?? {});
-      if (!identity) {
-        // No fragment-token recovery, no login redirect. If the
-        // gateway is doing its job, this never fires; if it does,
-        // it's a misrouted/test/tamper request and should fail
-        // closed.
-        return sendJson(res, 401, {
-          ok: false,
-          error: 'unauthenticated',
-          reason: 'missing_or_invalid_operatum_headers',
-        });
+      if (identity) {
+        // appId == buildId; keeping the bearer-mode field name so
+        // app code doesn't have to branch on auth mode.
+        req.operatum = {
+          userId:   identity.userId,
+          email:    identity.email,
+          tenantId: identity.tenantId,
+          appId:    identity.buildId,
+          role:     identity.role,
+          perms:    identity.perms,
+          ...(identity.displayName !== undefined && { displayName: identity.displayName }),
+          // raw exposes the headers themselves for debugging; bearer
+          // mode exposes the JWT claims — the field names differ but
+          // the role (audit + introspection) is the same.
+          raw: { ...identity },
+        };
+        return next();
       }
-      // appId == buildId; keeping the bearer-mode field name so
-      // app code doesn't have to branch on auth mode.
-      req.operatum = {
-        userId:   identity.userId,
-        email:    identity.email,
-        tenantId: identity.tenantId,
-        appId:    identity.buildId,
-        role:     identity.role,
-        perms:    identity.perms,
-        ...(identity.displayName !== undefined && { displayName: identity.displayName }),
-        // raw exposes the headers themselves for debugging; bearer
-        // mode exposes the JWT claims — the field names differ but
-        // the role (audit + introspection) is the same.
-        raw: { ...identity },
-      };
-      return next();
+
+      // No user identity headers — try a cross-app dependency/service token.
+      if (svc) {
+        const m = /^Bearer\s+(.+)$/i.exec(getHeader(req, 'authorization') || '');
+        if (m) {
+          try {
+            const p = await verifyDepToken(m[1].trim(), svc);
+            req.operatum = {
+              principalKind: 'service',
+              userId: null,
+              email: null,
+              tenantId: p.tenantId,
+              appId: svc.ownBuildId,
+              role: 'service',
+              perms: [], // service principals carry no user perms (requirePerm → 403)
+              serviceName: p.serviceName,
+              scopes: p.scopes,
+              raw: { principalKind: 'service', serviceName: p.serviceName, scopes: p.scopes },
+            };
+            return next();
+          } catch { /* fall through to 401 */ }
+        }
+      }
+
+      // No fragment-token recovery, no login redirect. If the gateway is doing
+      // its job, this never fires; if it does, it's a misrouted/test/tamper
+      // request and should fail closed.
+      return sendJson(res, 401, {
+        ok: false,
+        error: 'unauthenticated',
+        reason: 'missing_or_invalid_operatum_headers',
+      });
     };
   }
 
@@ -179,6 +213,29 @@ export function createOperatumAuthFromHeaders() {
       }
       if (!req.operatum.perms.includes(perm)) {
         return sendJson(res, 403, { ok: false, error: `missing '${perm}' permission` });
+      }
+      return next();
+    };
+  }
+
+  // Guard a route to a cross-app dependency caller: a verified SERVICE principal
+  // holding a dep scope for THIS app. `{ tool }` additionally requires the
+  // matching mcp tool scope (a base `app:dep:<id>` grant also satisfies it).
+  function requireDepScope({ tool } = {}) {
+    return (req, res, next) => {
+      const op = req.operatum;
+      if (!op || op.principalKind !== 'service') {
+        return sendJson(res, 403, { ok: false, error: 'forbidden', reason: 'service_principal_required' });
+      }
+      const scopes = op.scopes || [];
+      if (tool) {
+        const hasTool = scopes.some((s) => parseDepScope(s) === op.appId && parseDepToolScope(s) === tool);
+        const hasBase = scopes.some((s) => parseDepScope(s) === op.appId && parseDepToolScope(s) === null);
+        if (!hasTool && !hasBase) {
+          return sendJson(res, 403, { ok: false, error: 'forbidden', reason: `missing dep tool scope '${tool}'` });
+        }
+      } else if (!scopes.some((s) => parseDepScope(s) === op.appId)) {
+        return sendJson(res, 403, { ok: false, error: 'forbidden', reason: 'missing dep scope' });
       }
       return next();
     };
@@ -195,7 +252,34 @@ export function createOperatumAuthFromHeaders() {
     );
   }
 
-  return { middleware, requirePerm, verify };
+  return { middleware, requirePerm, requireDepScope, verify };
+}
+
+/**
+ * Resolve the optional dep-token verification config from opts + platform env.
+ * Returns null (→ pure header mode) when service tokens are explicitly disabled
+ * or the required inputs (this app's build id + a JWKS) are absent.
+ */
+function resolveServiceConfig(opts) {
+  if (opts.enableServiceTokens === false) return null;
+  const ownBuildId = opts.ownBuildId
+    || process.env.OPERATUM_APP_ID || process.env.OPERATUM_BUILD_ID || null;
+  const gatewayUrl = opts.gatewayUrl || process.env.OPERATUM_GATEWAY_URL || null;
+  const jwksUri = opts.jwksUri || process.env.OPERATUM_JWKS_URL
+    || (gatewayUrl ? `${gatewayUrl}/.well-known/jwks.json` : null);
+  // Need this app's id and a way to check signatures (a JWKS URL, or an
+  // injected jwks instance for tests/embedding); else fall back to header-only.
+  if (!ownBuildId || (!jwksUri && !opts.jwks)) return null;
+  return {
+    ownBuildId,
+    jwks: opts.jwks || new JwksCache({ jwksUri, fetchImpl: opts.fetchImpl }),
+    // Revocation callback (immediate revocation). Omitting it (no gatewayUrl)
+    // falls back to crypto + scope + the token's own TTL.
+    introspectUrl: opts.introspectUrl
+      || (gatewayUrl ? `${gatewayUrl}/api/service-tokens/introspect` : null),
+    fetchImpl: opts.fetchImpl,
+    verifyImpl: opts.verifyImpl,
+  };
 }
 
 // Expose getHeader for tests that need to check framework-adapter
