@@ -191,7 +191,13 @@ export function createOperatumAuthFromHeaders(opts = {}) {
               raw: { principalKind: 'service', serviceName: p.serviceName, scopes: p.scopes },
             };
             return next();
-          } catch { /* fall through to 401 */ }
+          } catch (err) {
+            // Fall through to 401, but surface the reason for ops — "every dep
+            // call suddenly 401s" (bad JWKS, revocation-callback down, clock
+            // skew) must be diagnosable. Code/name only; never leak to the body.
+            (opts.logger || console).warn?.(
+              '[operatum-auth] dep token rejected:', err?.code || err?.name || 'error');
+          }
         }
       }
 
@@ -272,6 +278,8 @@ function resolveServiceConfig(opts) {
   if (!ownBuildId || (!jwksUri && !opts.jwks)) return null;
   return {
     ownBuildId,
+    // This producer's tenant — used to reject cross-tenant dep tokens (v1).
+    ownTenantId: opts.ownTenantId || process.env.OPERATUM_TENANT_ID || null,
     jwks: opts.jwks || new JwksCache({ jwksUri, fetchImpl: opts.fetchImpl }),
     // Revocation callback (immediate revocation). Omitting it (no gatewayUrl)
     // falls back to crypto + scope + the token's own TTL.

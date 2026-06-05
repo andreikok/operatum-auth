@@ -56,7 +56,7 @@ export function parseDepToolScope(scope) {
  *                    tenantId:string|null, scopes:string[]}>}
  */
 export async function verifyDepToken(token, {
-  jwks, ownBuildId, introspectUrl, fetchImpl, verifyImpl,
+  jwks, ownBuildId, ownTenantId, introspectUrl, fetchImpl, verifyImpl,
 } = {}) {
   if (!ownBuildId) throw new TokenError('ownBuildId required', 'misconfigured');
   const verify = verifyImpl || (await import('./jwt-verify.js')).verifyToken;
@@ -64,6 +64,14 @@ export async function verifyDepToken(token, {
   // 1. Crypto: signature + iss + exp + aud-prefix.
   const payload = await verify(token, { jwks, audiencePrefix: 'operatum-service:' });
   if (payload.role !== 'service') throw new TokenError('not a service token', 'bad_role');
+
+  // 1b. Tenant isolation (v1 = same-tenant). The dep token must belong to this
+  //     producer's tenant. Enforced at mint by the gateway too; checking here
+  //     makes the invariant explicit and defends against a future cross-tenant
+  //     mint reaching a producer that hasn't opted in.
+  if (ownTenantId && String(payload.tenant_id) !== String(ownTenantId)) {
+    throw new TokenError('cross-tenant dep token rejected', 'forbidden');
+  }
 
   // 2. A dep grant for THIS producer (base or tool-scoped both carry the id).
   const scopes = Array.isArray(payload.scopes) ? payload.scopes : [];

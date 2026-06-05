@@ -121,3 +121,15 @@ test('requireDepScope({tool}): base scope satisfies; missing tool → 403', asyn
   assert.equal(bad, false);
   assert.equal(res._s, 403);
 });
+
+test('verifyDepToken: cross-tenant (token tenant != producer tenant) → forbidden', async () => {
+  await assert.rejects(() => verifyDepToken('tok',
+    { ownBuildId: B, ownTenantId: 't2', jwks: {}, verifyImpl: okVerify(), introspectUrl: 'http://gw/i', fetchImpl: activeFetch }),
+    /cross-tenant/);
+});
+
+test('verifyDepToken: same-tenant passes the tenant check', async () => {
+  const p = await verifyDepToken('tok',
+    { ownBuildId: B, ownTenantId: 't1', jwks: {}, verifyImpl: okVerify(), introspectUrl: 'http://gw/i', fetchImpl: activeFetch });
+  assert.equal(p.principalKind, 'service');
+});
