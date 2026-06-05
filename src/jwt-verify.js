@@ -45,7 +45,10 @@ function jwkToKeyObject(jwk) {
  * @param {string} token
  * @param {object} opts
  * @param {import('./jwks-cache.js').JwksCache} opts.jwks
- * @param {string} opts.expectedAudience   - e.g. `operatum-app:<buildId>`
+ * @param {string} [opts.expectedAudience]  - exact aud, e.g. `operatum-app:<buildId>`
+ * @param {string} [opts.audiencePrefix]    - aud must START WITH this, e.g.
+ *   `operatum-service:` (service-token names vary per token). Exactly one of
+ *   expectedAudience / audiencePrefix is required.
  * @param {string} [opts.issuer='operatum']
  * @param {number} [opts.clockSkewSec=30]  - seconds of leeway on iat/exp
  * @returns {Promise<object>} the verified payload
@@ -53,12 +56,18 @@ function jwkToKeyObject(jwk) {
 export async function verifyToken(token, {
   jwks,
   expectedAudience,
+  audiencePrefix,
   issuer = 'operatum',
   clockSkewSec = 30,
 } = {}) {
   if (!token || typeof token !== 'string') throw new TokenError('missing token', 'missing');
   if (!jwks) throw new TokenError('no JWKS configured', 'misconfigured');
-  if (!expectedAudience) throw new TokenError('no expectedAudience configured', 'misconfigured');
+  if (!expectedAudience && !audiencePrefix) {
+    throw new TokenError('no expectedAudience / audiencePrefix configured', 'misconfigured');
+  }
+  if (expectedAudience && audiencePrefix) {
+    throw new TokenError('pass exactly one of expectedAudience / audiencePrefix', 'misconfigured');
+  }
 
   const parts = token.split('.');
   if (parts.length !== 3) throw new TokenError('not a JWT', 'malformed');
@@ -88,7 +97,11 @@ export async function verifyToken(token, {
   if (issuer && payload.iss !== issuer) {
     throw new TokenError(`bad issuer ${payload.iss}`, 'bad_issuer');
   }
-  if (payload.aud !== expectedAudience) {
+  if (expectedAudience) {
+    if (payload.aud !== expectedAudience) {
+      throw new TokenError(`bad audience ${payload.aud}`, 'bad_audience');
+    }
+  } else if (typeof payload.aud !== 'string' || !payload.aud.startsWith(audiencePrefix)) {
     throw new TokenError(`bad audience ${payload.aud}`, 'bad_audience');
   }
   if (typeof payload.exp !== 'number' || nowSec > payload.exp + clockSkewSec) {
