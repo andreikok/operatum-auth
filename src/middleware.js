@@ -306,15 +306,32 @@ export function createOperatumAuth(opts) {
    * @param {import('express').Application | import('express').Router} app
    * @param {object} [opts]
    * @param {string} [opts.path='/_operatum/auth/handoff']
-   * @param {boolean} [opts.cookieSecure=true]   - Set Secure on the cookie
+   * @param {boolean} [opts.cookieSecure] - Set Secure on the cookie. DEFAULT is
+   *   TRANSPORT-AWARE (derived from the request): a `Secure` cookie is dropped by
+   *   the browser over plain HTTP, so a hard default of `true` made the session
+   *   cookie vanish on a plain-HTTP edge (e.g. an app served inside a Tailscale
+   *   tunnel) → the handoff looped and the app never loaded (white screen). Pass
+   *   an explicit boolean to override.
    * @param {string} [opts.cookieSameSite='lax'] - 'lax' | 'strict' | 'none'
    */
   function mountHandoff(app, opts = {}) {
     const {
       path = '/_operatum/auth/handoff',
-      cookieSecure = true,
+      cookieSecure,            // undefined → transport-aware (see reqIsSecure)
       cookieSameSite = 'lax',
     } = opts;
+
+    // Is the ORIGINAL client edge HTTPS? A `Secure` cookie is dropped over plain
+    // HTTP. Prefer req.secure (Express under `trust proxy`), then the edge's
+    // X-Forwarded-Proto, then req.protocol. Plain-HTTP tailnet → false (cookie
+    // stored, handoff completes); https (Cloudflare/reverse-proxy) → true.
+    const reqIsSecure = (req) => {
+      if (req?.secure === true) return true;
+      const xfp = req?.headers?.['x-forwarded-proto'];
+      if (xfp) return String(xfp).split(',')[0].trim().toLowerCase() === 'https';
+      const proto = req?.protocol;
+      return typeof proto === 'string' && proto.toLowerCase() === 'https';
+    };
 
     app.post(path, async (req, res) => {
       try {
@@ -339,7 +356,10 @@ export function createOperatumAuth(opts) {
           `SameSite=${cookieSameSite}`,
           `Max-Age=${Math.floor(maxAgeMs / 1000)}`,
         ];
-        if (cookieSecure) cookieParts.push('Secure');
+        const secure = typeof cookieSecure === 'boolean'
+          ? cookieSecure
+          : reqIsSecure(req);
+        if (secure) cookieParts.push('Secure');
         // Both Express's res.setHeader and Fastify's reply.header /
         // raw.setHeader work; raw is the most universal escape.
         if (typeof res.header === 'function') {

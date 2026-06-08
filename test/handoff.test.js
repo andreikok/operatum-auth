@@ -82,8 +82,36 @@ test('mountHandoff: valid token sets operatum.session cookie and returns expires
   assert.ok(setCookie.includes('operatum.session='), 'session cookie must be set');
   assert.ok(/HttpOnly/.test(setCookie), 'cookie must be httpOnly');
   assert.ok(/SameSite=lax/i.test(setCookie), 'cookie must default to SameSite=Lax');
-  assert.ok(/Secure/.test(setCookie), 'cookie must default to Secure');
+  // Secure now defaults to the request TRANSPORT (a hard Secure default dropped
+  // the cookie over plain-HTTP edges → handoff loop / white screen). This call
+  // has no secure transport → NOT Secure.
+  assert.ok(!/Secure/.test(setCookie), 'Secure defaults off over a plain-HTTP request');
   assert.ok(/Max-Age=\d+/.test(setCookie), 'cookie must carry Max-Age');
+});
+
+test('mountHandoff: Secure is TRANSPORT-AWARE — https edge → Secure, http → not', async () => {
+  const kp = mintKeypair();
+  const auth = createOperatumAuth({
+    jwksUri: 'x', expectedAudience: 'operatum-app:b', fetchImpl: jwksFetch([kp.jwk]),
+  });
+  const app = fakeApp();
+  auth.mountHandoff(app);
+  const now = Math.floor(Date.now() / 1000);
+  const token = sign({
+    privateKey: kp.privateKey, kid: kp.kid,
+    payload: { iss: 'operatum', aud: 'operatum-app:b', sub: 'u', exp: now + 60, iat: now },
+  });
+  // req.secure true (Express under trust proxy on an https edge) → Secure
+  const secureRes = await app.call('POST', '/_operatum/auth/handoff', { body: { token }, secure: true });
+  assert.ok(/Secure/.test(secureRes.headers['Set-Cookie']), 'req.secure → Secure');
+  // X-Forwarded-Proto: https (edge-terminated TLS) → Secure
+  const xfpRes = await app.call('POST', '/_operatum/auth/handoff',
+    { body: { token }, headers: { 'x-forwarded-proto': 'https' } });
+  assert.ok(/Secure/.test(xfpRes.headers['Set-Cookie']), 'X-Forwarded-Proto=https → Secure');
+  // X-Forwarded-Proto: http (plain tailnet edge) → NOT Secure
+  const httpRes = await app.call('POST', '/_operatum/auth/handoff',
+    { body: { token }, headers: { 'x-forwarded-proto': 'http' } });
+  assert.ok(!/Secure/.test(httpRes.headers['Set-Cookie']), 'X-Forwarded-Proto=http → not Secure');
 });
 
 test('mountHandoff: rejects missing token with 400', async () => {
