@@ -10,6 +10,7 @@
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import {
   createOperatumAuthFromHeaders, readOperatumHeaders, _getHeader,
 } from '../src/header-mode.js';
@@ -256,6 +257,112 @@ describe('returned API shape — drop-in parity with createOperatumAuth', () => 
   test('does NOT expose jwks (no JWKS in this mode)', () => {
     const auth = createOperatumAuthFromHeaders();
     assert.equal('jwks' in auth, false);
+  });
+});
+
+// ── HMAC proof-of-gateway tests ───────────────────────────────────────────────
+//
+// Helpers that mirror operatum-ui/gateway/src/lib/operatum-headers.js so we
+// can produce valid signed header sets for testing without importing the gateway.
+
+const HMAC_HEADER_NAMES = [
+  'x-operatum-user-id', 'x-operatum-tenant-id', 'x-operatum-email',
+  'x-operatum-display-name', 'x-operatum-role', 'x-operatum-build-id',
+  'x-operatum-perms', 'x-operatum-auth-mode',
+];
+
+function signHeaders(headers, secret, ts = String(Date.now())) {
+  const parts = [];
+  for (const name of HMAC_HEADER_NAMES) {
+    const v = headers[name];
+    if (v != null) parts.push(`${name}=${v}`);
+  }
+  parts.push(`x-operatum-timestamp=${ts}`);
+  const sig = createHmac('sha256', secret).update(parts.join('\n')).digest('hex');
+  return { ...headers, 'x-operatum-timestamp': ts, 'x-operatum-signature': sig };
+}
+
+const TEST_SECRET = 'test-signing-secret-32-bytes-long!!';
+const FIXED_TS = String(Date.now());
+
+describe('readOperatumHeaders — HMAC signature enforcement', () => {
+  test('presence-only still works when no secret supplied', () => {
+    const r = readOperatumHeaders(validHeaders());
+    assert.ok(r, 'presence-only path must still work without a secret');
+  });
+
+  test('accepts valid signed headers when secret matches', () => {
+    const signed = signHeaders(validHeaders(), TEST_SECRET, FIXED_TS);
+    const r = readOperatumHeaders(signed, { secret: TEST_SECRET, now: Number(FIXED_TS) });
+    assert.ok(r, 'must accept correctly signed headers');
+    assert.equal(r.userId, UUID_USER);
+  });
+
+  test('rejects unsigned headers when secret is configured', () => {
+    const r = readOperatumHeaders(validHeaders(), { secret: TEST_SECRET, now: Number(FIXED_TS) });
+    assert.equal(r, null, 'unsigned headers must be rejected when secret is set');
+  });
+
+  test('rejects headers with wrong signature', () => {
+    const signed = signHeaders(validHeaders(), 'wrong-secret', FIXED_TS);
+    const r = readOperatumHeaders(signed, { secret: TEST_SECRET, now: Number(FIXED_TS) });
+    assert.equal(r, null, 'wrong-key signature must be rejected');
+  });
+
+  test('rejects stale timestamp (anti-replay)', () => {
+    const staleTs = String(Date.now() - 6 * 60 * 1000); // 6 min ago, outside ±5 min window
+    const signed = signHeaders(validHeaders(), TEST_SECRET, staleTs);
+    const r = readOperatumHeaders(signed, { secret: TEST_SECRET, now: Date.now() });
+    assert.equal(r, null, 'stale signature must be rejected');
+  });
+
+  test('rejects when signature header is missing', () => {
+    const signed = signHeaders(validHeaders(), TEST_SECRET, FIXED_TS);
+    delete signed['x-operatum-signature'];
+    const r = readOperatumHeaders(signed, { secret: TEST_SECRET, now: Number(FIXED_TS) });
+    assert.equal(r, null, 'missing signature must be rejected');
+  });
+
+  test('rejects when timestamp header is missing', () => {
+    const signed = signHeaders(validHeaders(), TEST_SECRET, FIXED_TS);
+    delete signed['x-operatum-timestamp'];
+    const r = readOperatumHeaders(signed, { secret: TEST_SECRET, now: Number(FIXED_TS) });
+    assert.equal(r, null, 'missing timestamp must be rejected');
+  });
+});
+
+describe('createOperatumAuthFromHeaders — HMAC enforcement via opts.secret', () => {
+  test('accepts valid signed headers when opts.secret matches', () => {
+    const auth = createOperatumAuthFromHeaders({ secret: TEST_SECRET });
+    const signed = signHeaders(validHeaders(), TEST_SECRET, FIXED_TS);
+    const req = { headers: signed };
+    const res = makeRes();
+    let nextCalled = false;
+    // inject clock so the signature isn't stale by test runtime
+    // (middleware uses Date.now() internally; we seed a fresh TS above)
+    auth.middleware()(req, res, () => { nextCalled = true; });
+    assert.equal(nextCalled, true, 'next must fire for correctly signed headers');
+    assert.equal(res.captured.status, null);
+  });
+
+  test('rejects unsigned headers when opts.secret is set (fails closed)', () => {
+    const auth = createOperatumAuthFromHeaders({ secret: TEST_SECRET });
+    const req = { headers: validHeaders() }; // no signature headers
+    const res = makeRes();
+    auth.middleware()(req, res, () => {
+      assert.fail('next must NOT fire for unsigned headers when secret is configured');
+    });
+    assert.equal(res.captured.status, 401);
+    assert.equal(res.captured.body.error, 'unauthenticated');
+  });
+
+  test('presence-only when no secret (backward compat)', () => {
+    const auth = createOperatumAuthFromHeaders(); // no opts.secret, no env var
+    const req = { headers: validHeaders() };
+    const res = makeRes();
+    let nextCalled = false;
+    auth.middleware()(req, res, () => { nextCalled = true; });
+    assert.equal(nextCalled, true, 'presence-only must still work when no secret');
   });
 });
 

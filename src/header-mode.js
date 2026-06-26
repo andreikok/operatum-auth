@@ -52,11 +52,66 @@
  * otherwise would mask infrastructure bugs.
  */
 
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { JwksCache } from './jwks-cache.js';
 import { verifyDepToken, parseDepScope, parseDepToolScope } from './service-mode.js';
 
 const ROLES = new Set(['admin', 'builder', 'reviewer', 'viewer']);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// ── HMAC proof-of-gateway (defense-in-depth) ─────────────────────────────────
+//
+// Vendored in sync with operatum-ui/gateway/src/lib/operatum-headers.js.
+// The protocol is the contract; both sides MUST produce identical canonical
+// strings for the same header set + timestamp.
+//
+// The header name ordering in OPERATUM_HEADER_NAMES is pinned — both signer
+// (gateway) and verifier (here) iterate this exact sequence.
+
+const OPERATUM_TIMESTAMP_HEADER = 'x-operatum-timestamp';
+const OPERATUM_SIGNATURE_HEADER = 'x-operatum-signature';
+const DEFAULT_SIGNATURE_MAX_AGE_MS = 5 * 60 * 1000; // ±5 min replay window
+
+// Ordered exactly as in operatum-headers.js — do not reorder.
+const OPERATUM_HEADER_NAMES = Object.freeze([
+  'x-operatum-user-id',
+  'x-operatum-tenant-id',
+  'x-operatum-email',
+  'x-operatum-display-name',
+  'x-operatum-role',
+  'x-operatum-build-id',
+  'x-operatum-perms',
+  'x-operatum-auth-mode',
+]);
+
+function canonicalStringForSigning(headers, timestamp) {
+  const parts = [];
+  for (const name of OPERATUM_HEADER_NAMES) {
+    const v = headers[name] ?? headers[name.toUpperCase()];
+    if (v != null) parts.push(`${name}=${v}`);
+  }
+  parts.push(`${OPERATUM_TIMESTAMP_HEADER}=${timestamp}`);
+  return parts.join('\n');
+}
+
+function verifyOperatumSignature(headers, secret, opts = {}) {
+  if (!secret || !headers || typeof headers !== 'object') return false;
+  const { maxAgeMs = DEFAULT_SIGNATURE_MAX_AGE_MS, now = Date.now() } = opts;
+  const get = (k) => headers[k] ?? headers[k.toUpperCase()];
+  const ts = get(OPERATUM_TIMESTAMP_HEADER);
+  const provided = get(OPERATUM_SIGNATURE_HEADER);
+  if (!ts || !provided) return false;
+  const tsNum = Number(ts);
+  if (!Number.isFinite(tsNum)) return false;
+  if (Math.abs(now - tsNum) > maxAgeMs) return false;
+  const expected = createHmac('sha256', secret)
+    .update(canonicalStringForSigning(headers, ts))
+    .digest('hex');
+  if (provided.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Read X-Operatum-* headers off a request, validate every field,
@@ -67,8 +122,19 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * because @operatum/auth has zero runtime deps. Drift would break
  * authentication; both implementations are pinned by tests in
  * their respective repos. The protocol is the contract.
+ *
+ * When `opts.secret` is supplied the reader additionally REQUIRES a valid,
+ * fresh HMAC signature (x-operatum-signature + x-operatum-timestamp) and
+ * returns null if it is missing or wrong — presence alone is no longer
+ * sufficient. Without a secret the behaviour is unchanged (presence-only).
+ *
+ * @param {Object<string,string>} headers
+ * @param {object} [opts]
+ * @param {string|Buffer} [opts.secret]  — per-deploy shared secret; enables signature enforcement
+ * @param {number} [opts.maxAgeMs]       — replay window (default 5 min)
+ * @param {number} [opts.now]            — injectable clock for tests
  */
-export function readOperatumHeaders(headers) {
+export function readOperatumHeaders(headers, opts = {}) {
   if (!headers || typeof headers !== 'object') return null;
   const get = (k) => headers[k] ?? headers[k.toUpperCase()];
 
@@ -89,6 +155,13 @@ export function readOperatumHeaders(headers) {
   // literal) MUST NOT authenticate via headers — that path is
   // for the JWT verifier in createOperatumAuth.
   if (authMode !== 'reverse-proxy')  return null;
+
+  // Cryptographic proof-of-gateway: when a shared secret is configured the
+  // signature MUST verify. No half-auth — a missing/forged signature is
+  // indistinguishable from any other malformed header set (null).
+  if (opts.secret && !verifyOperatumSignature(headers, opts.secret, opts)) {
+    return null;
+  }
 
   let perms;
   try {
@@ -135,9 +208,24 @@ function sendJson(res, status, body) {
  * No JWKS, no audience, no cookies, no handoff — every config
  * required by JWT mode is absent here, by design.
  *
+ * When OPERATUM_GATEWAY_SIGNING_SECRET is set in the environment (injected
+ * by the platform at deploy time), the middleware REQUIRES a valid HMAC
+ * signature over the X-Operatum-* identity headers. Unsigned or forged
+ * identity headers are rejected (null → 401). When the env var is absent
+ * the middleware falls back to presence-only mode for backward compatibility
+ * during rollout. Pass `opts.secret` to override the env var in tests.
+ *
+ * @param {object} [opts]
+ * @param {string|Buffer} [opts.secret] — signing secret override (default: process.env.OPERATUM_GATEWAY_SIGNING_SECRET)
  * @returns {{middleware, requirePerm, verify}}
  */
 export function createOperatumAuthFromHeaders(opts = {}) {
+  // Resolve the per-deploy gateway→app HMAC signing secret. The platform
+  // injects it as OPERATUM_GATEWAY_SIGNING_SECRET into the app container;
+  // opts.secret lets tests supply it directly without touching the env.
+  // When neither is present the middleware stays in presence-only mode.
+  const signingSecret = opts.secret || process.env.OPERATUM_GATEWAY_SIGNING_SECRET || null;
+
   // Optional cross-app dependency-token path. A dep call goes container→
   // container (host.docker.internal:<port>) carrying only a Bearer service
   // token — no X-Operatum-* identity headers — so the producer must verify it
@@ -152,7 +240,8 @@ export function createOperatumAuthFromHeaders(opts = {}) {
       // For Fastify too. We pass the headers object (not req) into
       // the read because the read is the protocol contract — nothing
       // framework-specific about it.
-      const identity = readOperatumHeaders(req.headers ?? {});
+      const readOpts = signingSecret ? { secret: signingSecret } : {};
+      const identity = readOperatumHeaders(req.headers ?? {}, readOpts);
       if (identity) {
         // appId == buildId; keeping the bearer-mode field name so
         // app code doesn't have to branch on auth mode.
