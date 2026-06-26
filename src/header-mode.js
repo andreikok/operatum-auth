@@ -104,11 +104,16 @@ function verifyOperatumSignature(headers, secret, opts = {}) {
   const tsNum = Number(ts);
   if (!Number.isFinite(tsNum)) return false;
   if (Math.abs(now - tsNum) > maxAgeMs) return false;
+  // Validate signature is exactly 64 hex characters before any Buffer work.
+  // Buffer.from(s, 'utf8') on a non-ASCII 64-char string produces a LONGER
+  // buffer (multi-byte encoding), causing timingSafeEqual to throw rather
+  // than return false. Decoding both sides with 'hex' guarantees equal
+  // 32-byte buffers and eliminates that throw path.
+  if (!/^[0-9a-f]{64}$/i.test(provided)) return false;
   const expected = createHmac('sha256', secret)
     .update(canonicalStringForSigning(headers, ts))
     .digest('hex');
-  if (provided.length !== expected.length) return false;
-  return timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+  return timingSafeEqual(Buffer.from(provided, 'hex'), Buffer.from(expected, 'hex'));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
