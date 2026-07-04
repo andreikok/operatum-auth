@@ -17,6 +17,13 @@ Both factories return the **same object shape**
 `req.operatum` identity, so an app can swap one for the other without
 touching its route code.
 
+> **What this SDK does — and does not — do.** It *verifies* Operatum
+> tokens and *reads* gateway-injected headers; it never issues, mints,
+> or signs tokens (that is the gateway's job). It has no delegation /
+> actor / on-behalf-of ("act-chain") claim handling — the only
+> cross-principal path is the dependency/service-token scope grant
+> below. See `ARCHITECTURE.md` for the verified, source-cited details.
+
 > The auth posture is pinned in `.operatum/manifest.yaml`
 > (`auth.mode: reverse-proxy` | `bearer`). The code and the manifest
 > must stay in lockstep — a mismatch makes every request 401.
@@ -72,6 +79,18 @@ A request that arrives without valid headers gets a flat
 `401 { ok:false, error:'unauthenticated', reason:'missing_or_invalid_operatum_headers' }`.
 There is no login redirect or fragment recovery — that's the gateway's
 job on the front side.
+
+#### Optional HMAC second factor
+
+Topology is the primary trust anchor. When a per-deploy shared secret is
+present — `createOperatumAuthFromHeaders({ secret })` or
+`OPERATUM_GATEWAY_SIGNING_SECRET` in the environment — the middleware
+*additionally* requires a valid, fresh HMAC-SHA256 signature over the
+identity headers (`x-operatum-signature` + `x-operatum-timestamp`, ±5 min
+replay window). Unsigned or forged headers are then rejected (401). With
+no secret set the middleware stays in presence-only mode, so existing
+zero-config callers are unaffected. See `ARCHITECTURE.md` →
+*HMAC proof-of-gateway*.
 
 ### Cross-app dependency / service tokens (optional)
 
@@ -198,11 +217,13 @@ and `userId/email = null`.
 | `verifyToken(token, opts)` | bearer | low-level JWT verify |
 | `JwksCache` | bearer | JWKS fetch + cache |
 | `TokenError` | bearer | typed verify error (`.code`) |
-| `readOperatumHeaders(headers)` | header | parse/validate `X-Operatum-*` → identity\|null |
+| `readOperatumHeaders(headers, opts?)` | header | parse/validate `X-Operatum-*` → identity\|null (`opts.secret` enforces the HMAC signature) |
 | `verifyDepToken` / `parseDepScope` / `parseDepToolScope` | service | dep-token verification helpers |
 
 Works with both Express (`req.get`/`res.status`) and Fastify
 (`req.headers`/`reply.code`) — the middleware detects the framework.
 
 See `ARCHITECTURE.md` for the full header contract, the JWT audience
-binding, and what this SDK exposes vs. consumes.
+binding, and what this SDK exposes vs. consumes. Every `src/…:line`
+citation in that doc is verified by `test/docs-citations.test.js`, so the
+docs cannot silently drift from the source.
