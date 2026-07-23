@@ -9,19 +9,18 @@
  * Trust model
  * ───────────
  *
- * The headers are trusted because of TOPOLOGY, not crypto:
+ * The identity envelope is anchored by topology and, on provisioned
+ * deployments, a per-app/per-environment proof-of-gateway HMAC:
  *
  *   - the app container binds --publish 127.0.0.1::N (loopback only)
  *   - it joins the per-build docker network operatum-net-<id>-<env>
  *   - the gateway is the only origin that can reach the app's port
  *
- * Therefore: any X-Operatum-* header that arrives at the app came
- * from the gateway. There is no "spoof from outside" attack vector
- * unless the topology guarantee is broken (which would also break
- * every other security assumption — credential injection, secrets,
- * etc.). When apps run OUTSIDE this topology (local dev, k8s with
- * different network rules), this mode is unsafe and apps should
- * use createOperatumAuth (JWT bearer mode) instead.
+ * The gateway strips inbound copies before injecting its own values. A
+ * provisioned OPERATUM_GATEWAY_SIGNING_SECRET makes unsigned identity fail
+ * closed. When apps run outside this topology without the HMAC (local dev,
+ * foreign k8s networking), this mode is unsafe and apps should use
+ * createOperatumAuth (JWT bearer mode) instead.
  *
  * Why this is a SEPARATE export from createOperatumAuth
  * ─────────────────────────────────────────────────────
@@ -70,6 +69,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const OPERATUM_TIMESTAMP_HEADER = 'x-operatum-timestamp';
 const OPERATUM_SIGNATURE_HEADER = 'x-operatum-signature';
+const OPERATUM_THREAD_HEADER = 'x-operatum-thread-id';
+const OPERATUM_THREAD_SIGNATURE_HEADER = 'x-operatum-thread-signature';
 const DEFAULT_SIGNATURE_MAX_AGE_MS = 5 * 60 * 1000; // ±5 min replay window
 
 // Ordered exactly as in operatum-headers.js — do not reorder.
@@ -116,6 +117,38 @@ function verifyOperatumSignature(headers, secret, opts = {}) {
   return timingSafeEqual(Buffer.from(provided, 'hex'), Buffer.from(expected, 'hex'));
 }
 
+function canonicalThreadContext(headers, timestamp) {
+  const get = (k) => headers[k] ?? headers[k.toUpperCase()];
+  return [
+    'operatum-thread-context-v1',
+    `x-operatum-user-id=${get('x-operatum-user-id') ?? ''}`,
+    `x-operatum-tenant-id=${get('x-operatum-tenant-id') ?? ''}`,
+    `x-operatum-build-id=${get('x-operatum-build-id') ?? ''}`,
+    `${OPERATUM_THREAD_HEADER}=${get(OPERATUM_THREAD_HEADER) ?? ''}`,
+    `${OPERATUM_TIMESTAMP_HEADER}=${timestamp}`,
+  ].join('\n');
+}
+
+/**
+ * Verify the optional, domain-separated agent-thread context. This is not part
+ * of the frozen identity canonical string, so introducing it cannot invalidate
+ * older app readers. Callers must first verify the identity signature and its
+ * timestamp; readOperatumHeaders does so before invoking this helper.
+ */
+export function verifyOperatumThreadContext(headers, secret) {
+  if (!secret || !headers || typeof headers !== 'object') return false;
+  const get = (k) => headers[k] ?? headers[k.toUpperCase()];
+  const timestamp = get(OPERATUM_TIMESTAMP_HEADER);
+  const threadId = get(OPERATUM_THREAD_HEADER);
+  const provided = get(OPERATUM_THREAD_SIGNATURE_HEADER);
+  if (!timestamp || !UUID_RE.test(threadId ?? '')
+      || !/^[0-9a-f]{64}$/i.test(provided ?? '')) return false;
+  const expected = createHmac('sha256', secret)
+    .update(canonicalThreadContext(headers, timestamp))
+    .digest('hex');
+  return timingSafeEqual(Buffer.from(provided, 'hex'), Buffer.from(expected, 'hex'));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -132,6 +165,12 @@ function verifyOperatumSignature(headers, secret, opts = {}) {
  * fresh HMAC signature (x-operatum-signature + x-operatum-timestamp) and
  * returns null if it is missing or wrong — presence alone is no longer
  * sufficient. Without a secret the behaviour is unchanged (presence-only).
+ *
+ * A gateway may additionally supply a signed agent thread context. It is
+ * returned as `threadId` only when `opts.secret` is configured and the
+ * separate thread-context HMAC verifies. Presence-only readers deliberately
+ * ignore an unsigned thread claim, because it must never become a state or
+ * isolation key.
  *
  * @param {Object<string,string>} headers
  * @param {object} [opts]
@@ -150,10 +189,12 @@ export function readOperatumHeaders(headers, opts = {}) {
   const buildId  = get('x-operatum-build-id');
   const permsRaw = get('x-operatum-perms');
   const authMode = get('x-operatum-auth-mode');
+  const threadId = get(OPERATUM_THREAD_HEADER);
 
   if (!UUID_RE.test(userId ?? ''))   return null;
   if (!UUID_RE.test(tenantId ?? '')) return null;
   if (!UUID_RE.test(buildId ?? ''))  return null;
+  if (threadId != null && !UUID_RE.test(threadId)) return null;
   if (!email || !ROLES.has(role))    return null;
   // The auth-mode literal is the bypass-guard. A request that
   // somehow lands here without it (or with the legacy 'bearer'
@@ -167,6 +208,8 @@ export function readOperatumHeaders(headers, opts = {}) {
   if (opts.secret && !verifyOperatumSignature(headers, opts.secret, opts)) {
     return null;
   }
+  if (threadId && opts.secret
+      && !verifyOperatumThreadContext(headers, opts.secret)) return null;
 
   let perms;
   try {
@@ -179,6 +222,7 @@ export function readOperatumHeaders(headers, opts = {}) {
     email: decodeURIComponent(email),
     role, buildId, perms, authMode,
   };
+  if (threadId && opts.secret) out.threadId = threadId;
   const dn = get('x-operatum-display-name');
   if (dn) {
     try { out.displayName = decodeURIComponent(dn); }
@@ -257,6 +301,7 @@ export function createOperatumAuthFromHeaders(opts = {}) {
           appId:    identity.buildId,
           role:     identity.role,
           perms:    identity.perms,
+          ...(identity.threadId !== undefined && { threadId: identity.threadId }),
           ...(identity.displayName !== undefined && { displayName: identity.displayName }),
           // raw exposes the headers themselves for debugging; bearer
           // mode exposes the JWT claims — the field names differ but
