@@ -80,6 +80,18 @@ A request that arrives without valid headers gets a flat
 There is no login redirect or fragment recovery — that's the gateway's
 job on the front side.
 
+#### Optional signed agent-thread context
+
+Agent-to-app calls may include `x-operatum-thread-id` and
+`x-operatum-thread-signature`. The thread signature is domain-separated from
+the frozen identity signature and binds the user, tenant, build, thread, and
+existing timestamp. With `OPERATUM_GATEWAY_SIGNING_SECRET` configured,
+`readOperatumHeaders` and the middleware expose the verified value as
+`threadId`. Presence-only readers ignore an unsigned thread claim. Apps may use
+this only as one component of a bounded state key—normally
+tenant + user + thread + app policy—and must never accept a model/request-body
+session identifier instead.
+
 #### Optional HMAC second factor
 
 Topology is the primary trust anchor. When a per-deploy shared secret is
@@ -217,7 +229,8 @@ and `userId/email = null`.
 | `verifyToken(token, opts)` | bearer | low-level JWT verify |
 | `JwksCache` | bearer | JWKS fetch + cache |
 | `TokenError` | bearer | typed verify error (`.code`) |
-| `readOperatumHeaders(headers, opts?)` | header | parse/validate `X-Operatum-*` → identity\|null (`opts.secret` enforces the HMAC signature) |
+| `readOperatumHeaders(headers, opts?)` | header | parse/validate `X-Operatum-*` → identity\|null (`opts.secret` enforces identity HMAC and any supplied thread-context HMAC) |
+| `verifyOperatumThreadContext(headers, secret)` | header | verify the optional domain-separated agent-thread context after identity verification |
 | `verifyDepToken` / `parseDepScope` / `parseDepToolScope` | service | dep-token verification helpers |
 
 Works with both Express (`req.get`/`res.status`) and Fastify

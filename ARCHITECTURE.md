@@ -246,12 +246,22 @@ inventory this SDK validates:
 | `x-operatum-display-name` | percent-encoded, optional | `src/header-mode.js:182-186` |
 | `x-operatum-timestamp` | epoch ms, HMAC mode only | `src/header-mode.js:101-106` |
 | `x-operatum-signature` | 64 hex chars, HMAC mode only | `src/header-mode.js:102-116` |
+| `x-operatum-thread-id` | optional agent thread UUID; exposed only after both signatures verify | `src/header-mode.js` |
+| `x-operatum-thread-signature` | optional domain-separated HMAC bound to user, tenant, build, thread, and timestamp | `src/header-mode.js` |
 
 `x-operatum-auth-mode` is the **bypass guard**: a request lacking it (or
 carrying the legacy `bearer` literal) must NOT authenticate via headers —
 that path belongs to the JWT verifier (`src/header-mode.js:158-162`).
 Free-text fields (`email`, `display-name`) are percent-decoded because
 HTTP/1.1 headers are ASCII-only (`src/header-mode.js:179`, `:182-186`).
+
+The thread context is deliberately outside the frozen identity canonical
+string. This keeps every existing identity signature byte-compatible while
+allowing upgraded stateful apps to trust a gateway-bound continuation key.
+Presence-only mode never exposes `threadId`; a caller-controlled header must
+not become an isolation boundary. Even a verified thread ID is only one key
+component—stateful apps must also scope retained state by tenant, user, and any
+app-specific policy, and apply bounded TTL/capacity cleanup.
 
 ## The JWT audience binding (bearer mode)
 
@@ -288,7 +298,8 @@ error:'unauthenticated', reason:'<code>' }`: `no_token`
 
 **EXPOSES** — what an app imports from `src/index.js` (`src/index.js:1-19`):
 
-- `createOperatumAuthFromHeaders` / `readOperatumHeaders` (header mode)
+- `createOperatumAuthFromHeaders` / `readOperatumHeaders` /
+  `verifyOperatumThreadContext` (header mode)
 - `createOperatumAuth` (bearer mode) → `middleware`, `requirePerm`,
   `verify`, `jwks`, `mountHandoff`
 - `verifyToken`, `JwksCache`, `TokenError` (low-level bearer primitives)

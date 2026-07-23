@@ -18,6 +18,7 @@ import {
 const UUID_USER  = '00000000-0000-0000-0000-000000000001';
 const UUID_TEN   = '00000000-0000-0000-0000-000000000002';
 const UUID_BUILD = '00000000-0000-0000-0000-000000000003';
+const UUID_THREAD = '00000000-0000-0000-0000-000000000004';
 
 const validHeaders = (overrides = {}) => ({
   'x-operatum-user-id':     UUID_USER,
@@ -158,6 +159,20 @@ describe('createOperatumAuthFromHeaders.middleware() — accept paths', () => {
     assert.equal(nextCalled, true);
     assert.deepEqual(req.operatum.perms, ['use', 'build']);
   });
+
+  test('propagates a verified thread context into req.operatum', () => {
+    const auth = createOperatumAuthFromHeaders({ secret: TEST_SECRET });
+    const identity = signHeaders(validHeaders(), TEST_SECRET);
+    const req = {
+      headers: addSignedThread(identity, UUID_THREAD, TEST_SECRET),
+    };
+    const res = makeRes();
+    let nextCalled = false;
+    auth.middleware()(req, res, () => { nextCalled = true; });
+    assert.equal(nextCalled, true);
+    assert.equal(req.operatum.threadId, UUID_THREAD);
+    assert.equal(req.operatum.raw.threadId, UUID_THREAD);
+  });
 });
 
 describe('createOperatumAuthFromHeaders.middleware() — reject paths', () => {
@@ -282,6 +297,23 @@ function signHeaders(headers, secret, ts = String(Date.now())) {
   return { ...headers, 'x-operatum-timestamp': ts, 'x-operatum-signature': sig };
 }
 
+function addSignedThread(headers, threadId, secret) {
+  const withThread = { ...headers, 'x-operatum-thread-id': threadId };
+  const canonical = [
+    'operatum-thread-context-v1',
+    `x-operatum-user-id=${withThread['x-operatum-user-id']}`,
+    `x-operatum-tenant-id=${withThread['x-operatum-tenant-id']}`,
+    `x-operatum-build-id=${withThread['x-operatum-build-id']}`,
+    `x-operatum-thread-id=${threadId}`,
+    `x-operatum-timestamp=${withThread['x-operatum-timestamp']}`,
+  ].join('\n');
+  return {
+    ...withThread,
+    'x-operatum-thread-signature': createHmac('sha256', secret)
+      .update(canonical).digest('hex'),
+  };
+}
+
 const TEST_SECRET = 'test-signing-secret-32-bytes-long!!';
 const FIXED_TS = String(Date.now());
 
@@ -296,6 +328,32 @@ describe('readOperatumHeaders — HMAC signature enforcement', () => {
     const r = readOperatumHeaders(signed, { secret: TEST_SECRET, now: Number(FIXED_TS) });
     assert.ok(r, 'must accept correctly signed headers');
     assert.equal(r.userId, UUID_USER);
+  });
+
+  test('returns only a separately signed thread context', () => {
+    const identity = signHeaders(validHeaders(), TEST_SECRET, FIXED_TS);
+    const signed = addSignedThread(identity, UUID_THREAD, TEST_SECRET);
+    const r = readOperatumHeaders(signed, {
+      secret: TEST_SECRET, now: Number(FIXED_TS),
+    });
+    assert.equal(r.threadId, UUID_THREAD);
+
+    const unsigned = {
+      ...validHeaders(),
+      'x-operatum-thread-id': UUID_THREAD,
+    };
+    assert.equal(readOperatumHeaders(unsigned).threadId, undefined);
+  });
+
+  test('rejects thread-context tampering without changing identity signature bytes', () => {
+    const identity = signHeaders(validHeaders(), TEST_SECRET, FIXED_TS);
+    const signed = addSignedThread(identity, UUID_THREAD, TEST_SECRET);
+    const identitySignature = signed['x-operatum-signature'];
+    signed['x-operatum-thread-id'] = UUID_BUILD;
+    assert.equal(signed['x-operatum-signature'], identitySignature);
+    assert.equal(readOperatumHeaders(signed, {
+      secret: TEST_SECRET, now: Number(FIXED_TS),
+    }), null);
   });
 
   test('rejects unsigned headers when secret is configured', () => {

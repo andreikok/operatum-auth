@@ -8,6 +8,7 @@ export { createOperatumAuth } from './middleware.js';
 // publishing; the trust anchor is topology, not crypto.
 export {
   createOperatumAuthFromHeaders, readOperatumHeaders,
+  verifyOperatumThreadContext,
 } from './header-mode.js';
 // D2/D3 — producer-side cross-app dependency-token verification. A dep call
 // arrives container→container with only a Bearer service token; the producer
