@@ -335,3 +335,16 @@ external; described here as the contract, not as verified gateway code):
 - `src/jwt-verify.js` / `src/jwks-cache.js` — JWT crypto + JWKS cache
 - `src/service-mode.js` — cross-app dep-token verification
 </content>
+
+---
+
+## Verification stamp — 2026-08-24
+
+Checked during a platform-wide documentation pass. **No source changes since this
+document was last written**, and the specific claim below was re-tested against
+the code or the running system rather than assumed:
+
+* The `X-Operatum-*` identity header set documented here matches `src/` **exactly** — diffed both ways, nothing missing and nothing stale. The ten headers are: auth-mode, build-id, display-name, email, perms, role, signature, tenant-id, thread-id, thread-signature.
+
+Treat the rest of this file as accurate to its original date. Where it and the
+source disagree, the source wins — and please correct the line.
