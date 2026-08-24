@@ -1,3 +1,17 @@
+> # ⚠ SUPERSEDED — do not use as a source of truth
+>
+> This file predates the 2026-06-20 code-grounded documentation pass and was
+> **explicitly superseded** by it (`PLATFORM-ARCHITECTURE.md` §6.5 lists these as
+> reader traps). Several files of this vintage made false "production-active"
+> claims.
+>
+> **Read `ARCHITECTURE.md` in this repository instead**, and
+> `operatum-ui/PLATFORM-ARCHITECTURE.md` for the cross-cutting model.
+>
+> Kept for history rather than deleted. Banner added 2026-08-24 — the supersession
+> was declared months earlier but never marked on the files themselves, so a grep
+> still surfaced them as if current.
+
 # operatum-auth — feature audit
 
 **Last audited:** 2026-04-24
