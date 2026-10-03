@@ -80,8 +80,49 @@ test('an env-LESS token is refused when the deployment env is known', async () =
   assert.equal(await through(authFor('dev'), mint()), '401:env_missing');
 });
 
-test('an unknown deployment env refuses every token (fail closed)', async () => {
-  assert.equal(await through(authFor('staging'), mint({ env: 'dev' })), '401:misconfigured');
+test('an unknown OPERATUM_APP_ENV refuses every token (fail closed)', async () => {
+  const prev = process.env.OPERATUM_APP_ENV;
+  process.env.OPERATUM_APP_ENV = 'staging';
+  try {
+    const auth = createOperatumAuth({ jwksUri: 'x', expectedAudience: 'operatum-app:b', fetchImpl });
+    assert.equal(await through(auth, mint({ env: 'dev' })), '401:misconfigured');
+    assert.equal(await through(auth, mint({ env: 'staging' })), '401:misconfigured');
+  } finally {
+    if (prev === undefined) delete process.env.OPERATUM_APP_ENV; else process.env.OPERATUM_APP_ENV = prev;
+  }
+});
+
+test('an explicitly passed invalid or non-string appEnv throws at construction', () => {
+  assert.throws(() => authFor('staging'), /appEnv "staging" is not dev\|test\|main\|prod/);
+  assert.throws(() => authFor(42), /appEnv must be a string/);
+  assert.throws(() => authFor(null), /appEnv must be a string/);
+  assert.doesNotThrow(() => authFor('Production'));
+});
+
+test('the cookie and ?operatum_token= carriers get the same env + purpose checks as Bearer', async () => {
+  const auth = authFor('main');
+  const viaCookie = async (token) => {
+    const res = mockRes(); let passed = false;
+    await auth.middleware()({
+      headers: { cookie: `operatum.session=${encodeURIComponent(token)}`, accept: 'application/json' },
+      query: {}, protocol: 'https', originalUrl: '/', get: (h) => (h === 'host' ? 'app.example' : undefined),
+    }, res, () => { passed = true; });
+    return passed ? 'pass' : `${res._state.status}:${res._state.body?.reason}`;
+  };
+  const viaQuery = async (token) => {
+    const res = mockRes(); let passed = false;
+    await auth.middleware()({
+      headers: { accept: 'application/json' },
+      query: { operatum_token: token }, protocol: 'https', originalUrl: '/', get: (h) => (h === 'host' ? 'app.example' : undefined),
+    }, res, () => { passed = true; });
+    return passed ? 'pass' : `${res._state.status}:${res._state.body?.reason}`;
+  };
+  for (const carry of [viaCookie, viaQuery]) {
+    assert.equal(await carry(mint({ env: 'main' })), 'pass', `${carry.name}: positive control`);
+    assert.equal(await carry(mint({ env: 'dev' })), '401:env_mismatch', carry.name);
+    assert.equal(await carry(mint()), '401:env_missing', carry.name);
+    assert.equal(await carry(mint({ env: 'main', purpose: 'public_host_session' })), '401:purpose_not_allowed', carry.name);
+  }
 });
 
 test('OPERATUM_APP_ENV is the default appEnv', async () => {

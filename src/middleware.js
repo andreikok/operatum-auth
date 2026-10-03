@@ -244,6 +244,17 @@ export function createOperatumAuth(opts) {
   if (!jwksUri) throw new Error('createOperatumAuth: jwksUri required');
   if (!expectedAudience) throw new Error('createOperatumAuth: expectedAudience required');
 
+  if (appEnv !== undefined && typeof appEnv !== 'string') {
+    throw new Error('createOperatumAuth: appEnv must be a string (dev|test|main|prod)');
+  }
+  if (Object.prototype.hasOwnProperty.call(opts || {}, 'appEnv') && typeof appEnv === 'string'
+      && appEnv.trim() && !canonicalAppEnv(appEnv)) {
+    // An explicitly passed value is a programming error: refuse to construct
+    // rather than run with every token refused (OPERATUM_APP_ENV from the
+    // environment still fails closed per request, below).
+    throw new Error(`createOperatumAuth: appEnv ${JSON.stringify(appEnv)} is not dev|test|main|prod`);
+  }
+
   const jwks = new JwksCache({ jwksUri, fetchImpl });
   // '' counts as unset. A set-but-unknown value is passed through so
   // verifyToken refuses every token (fail closed) rather than silently
