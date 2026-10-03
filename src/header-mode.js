@@ -419,6 +419,8 @@ function resolveServiceConfig(opts) {
     ownBuildId,
     // This producer's tenant — used to reject cross-tenant dep tokens (v1).
     ownTenantId: opts.ownTenantId || process.env.OPERATUM_TENANT_ID || null,
+    // This producer's env — dep tokens are bound to it (verifyDepToken).
+    ownEnv: opts.ownEnv || process.env.OPERATUM_APP_ENV || undefined,
     jwks: opts.jwks || new JwksCache({ jwksUri, fetchImpl: opts.fetchImpl }),
     // Revocation callback (immediate revocation). Omitting it (no gatewayUrl)
     // falls back to crypto + scope + the token's own TTL.

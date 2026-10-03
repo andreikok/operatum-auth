@@ -157,13 +157,16 @@ mode) when service tokens are disabled or this app's build id / a JWKS
 are absent (`src/header-mode.js:364-372`); existing zero-config callers
 are unaffected. Disable explicitly with `{ enableServiceTokens: false }`.
 
-`verifyDepToken` (`src/service-mode.js:58`) does, in order: (1) crypto
+`verifyDepToken` (`src/service-mode.js:64`) does, in order: (1) crypto
 verify via `verifyToken` with `audiencePrefix: 'operatum-service:'`
-(`:65`) and a `role === 'service'` check (`:66`); (2) a same-tenant check
-when `ownTenantId` is set (`:72-74`); (3) a `app:dep:<ownBuildId>` scope
-grant (`:77-80`); (4) a **fail-closed** revocation callback to the
-gateway introspection endpoint when `introspectUrl` is set (`:82-86`;
-non-2xx / network error → treated as inactive, `:96-108`).
+(`:75`) and a `role === 'service'` check (`:76`); (2) a same-tenant check
+when `ownTenantId` is set (`:82-84`); (2b) an env binding when `ownEnv` is set
+(default `OPERATUM_APP_ENV`): the gateway stamps the producer env the consumer
+is deployed against, and an env-less or other-env token is refused
+(`env_missing` / `env_mismatch`, `:89-94`); (3) a `app:dep:<ownBuildId>` scope
+grant (`:97-100`); (4) a **fail-closed** revocation callback to the
+gateway introspection endpoint when `introspectUrl` is set (`:102-106`;
+non-2xx / network error → treated as inactive, `:116-128`).
 `requireDepScope({ tool })` (`src/header-mode.js:324-342`) gates routes:
 it requires a verified `service` principal (`:327-329`) holding a dep
 scope for this app, with an optional per-tool scope (`:331-336`).
@@ -285,7 +288,7 @@ this repo). The app sets `expectedAudience` to
 match (`src/jwt-verify.js:125-128`) — so a token minted for app A cannot
 authenticate at app B. Service tokens instead use
 `aud: operatum-service:<name>`, matched by **prefix** because the name
-varies per token (`src/jwt-verify.js:129-131`, `src/service-mode.js:65`).
+varies per token (`src/jwt-verify.js:129-131`, `src/service-mode.js:75`).
 `verifyToken` enforces exactly one of `expectedAudience` /
 `audiencePrefix` (`src/jwt-verify.js:90-95`).
 
@@ -330,9 +333,9 @@ external; described here as the contract, not as verified gateway code):
 - the JWT contract: `iss='operatum'`, RS256, `aud=operatum-app:<buildId>`
   / `operatum-service:<name>`, claims `sub`/`email`/`tenant_id`/`app_id`/
   `role`/`perms`/`scopes` (as read at `src/middleware.js:304-312`,
-  `src/service-mode.js:65-93`)
+  `src/service-mode.js:75-113`)
 - the gateway service-token introspection endpoint for dep-token
-  revocation (`introspectUrl`, `src/service-mode.js:82-86`)
+  revocation (`introspectUrl`, `src/service-mode.js:102-106`)
 - platform-injected env: `OPERATUM_APP_ID`/`OPERATUM_BUILD_ID`,
   `OPERATUM_GATEWAY_URL`/`OPERATUM_JWKS_URL`, `OPERATUM_TENANT_ID`,
   `OPERATUM_GATEWAY_SIGNING_SECRET` (resolved at

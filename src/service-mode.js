@@ -21,7 +21,7 @@
  * `dep.tenant: 'same'`). Cross-tenant deps are deferred.
  */
 
-import { TokenError } from './jwt-verify.js';
+import { TokenError, canonicalAppEnv } from './jwt-verify.js';
 
 // `app:dep:<uuid>` or `app:dep:<uuid>:tool:<name>`. Mirrors the gateway's
 // dep-scopes.js (the SDK can't import gateway code).
@@ -52,13 +52,23 @@ export function parseDepToolScope(scope) {
  * @param {typeof fetch} [opts.fetchImpl=fetch]
  * @param {(t:string, o:object)=>Promise<object>} [opts.verifyImpl] - injectable
  *                                          crypto verify (defaults to verifyToken)
+ * @param {string} [opts.ownEnv]         - this producer's environment
+ *   (dev|test|main; prod/production = main). When set, the dep token's `env`
+ *   claim must name the same environment and an env-less token is refused:
+ *   a consumer in env X is deployed against the producer in env X, so its
+ *   token must not open the producer's other envs. Unset keeps the old
+ *   behaviour (non-platform use).
  * @returns {Promise<{principalKind:'service', serviceName:string|null,
  *                    tenantId:string|null, scopes:string[]}>}
  */
 export async function verifyDepToken(token, {
-  jwks, ownBuildId, ownTenantId, introspectUrl, fetchImpl, verifyImpl,
+  jwks, ownBuildId, ownTenantId, introspectUrl, fetchImpl, verifyImpl, ownEnv,
 } = {}) {
   if (!ownBuildId) throw new TokenError('ownBuildId required', 'misconfigured');
+  const wantEnv = typeof ownEnv === 'string' && ownEnv.trim() ? canonicalAppEnv(ownEnv) : undefined;
+  if (typeof ownEnv === 'string' && ownEnv.trim() && !wantEnv) {
+    throw new TokenError(`unknown app environment ${ownEnv}`, 'misconfigured');
+  }
   const verify = verifyImpl || (await import('./jwt-verify.js')).verifyToken;
 
   // 1. Crypto: signature + iss + exp + aud-prefix.
@@ -71,6 +81,16 @@ export async function verifyDepToken(token, {
   //     mint reaching a producer that hasn't opted in.
   if (ownTenantId && String(payload.tenant_id) !== String(ownTenantId)) {
     throw new TokenError('cross-tenant dep token rejected', 'forbidden');
+  }
+
+  // 1c. Environment: the token was minted for the producer env the consumer
+  //     is deployed against (gateway stamps it). Checked on the claim itself,
+  //     whichever verifyImpl ran.
+  if (wantEnv) {
+    if (payload.env === undefined) throw new TokenError('dep token has no env claim', 'env_missing');
+    if (canonicalAppEnv(payload.env) !== wantEnv) {
+      throw new TokenError(`dep token is for env ${payload.env}, not ${wantEnv}`, 'env_mismatch');
+    }
   }
 
   // 2. A dep grant for THIS producer (base or tool-scoped both carry the id).
