@@ -133,3 +133,46 @@ test('verifyDepToken: same-tenant passes the tenant check', async () => {
     { ownBuildId: B, ownTenantId: 't1', jwks: {}, verifyImpl: okVerify(), introspectUrl: 'http://gw/i', fetchImpl: activeFetch });
   assert.equal(p.principalKind, 'service');
 });
+
+// ── Environment binding (gateway stamps env on dep tokens) ──────────────────
+// A consumer in env X is deployed against the producer in env X, so a dep
+// token minted for the dev consumer must not open the producer's test/main.
+
+test('verifyDepToken: ownEnv binds the token env (dev token refused by the test producer)', async () => {
+  const p = await verifyDepToken('tok', { ownBuildId: B, jwks: {}, ownEnv: 'dev', verifyImpl: okVerify({ env: 'dev' }) });
+  assert.equal(p.principalKind, 'service', 'positive control');
+  await assert.rejects(
+    verifyDepToken('tok', { ownBuildId: B, jwks: {}, ownEnv: 'test', verifyImpl: okVerify({ env: 'dev' }) }),
+    (e) => e.code === 'env_mismatch');
+  await assert.rejects(
+    verifyDepToken('tok', { ownBuildId: B, jwks: {}, ownEnv: 'prod', verifyImpl: okVerify() }),
+    (e) => e.code === 'env_missing', 'an env-less dep token is refused when the producer knows its env');
+  const prod = await verifyDepToken('tok', { ownBuildId: B, jwks: {}, ownEnv: 'prod', verifyImpl: okVerify({ env: 'main' }) });
+  assert.equal(prod.principalKind, 'service', 'prod (deployer) = main (gateway)');
+  await assert.rejects(
+    verifyDepToken('tok', { ownBuildId: B, jwks: {}, ownEnv: 'staging', verifyImpl: okVerify({ env: 'staging' }) }),
+    (e) => e.code === 'misconfigured');
+});
+
+test('verifyDepToken: no ownEnv (non-platform use) keeps the old behaviour', async () => {
+  const p = await verifyDepToken('tok', { ownBuildId: B, jwks: {}, verifyImpl: okVerify({ env: 'dev' }) });
+  assert.equal(p.principalKind, 'service');
+});
+
+test('middleware: the producer binds dep tokens to OPERATUM_APP_ENV', async () => {
+  const prev = process.env.OPERATUM_APP_ENV;
+  process.env.OPERATUM_APP_ENV = 'main';
+  try {
+    const mk = (env) => createOperatumAuthFromHeaders(
+      { ownBuildId: B, jwks: {}, verifyImpl: okVerify(env ? { env } : {}) });
+    assert.equal((await run(mk('main').middleware(), { headers: { authorization: 'Bearer tok' } })).nexted, true,
+      'positive control');
+    for (const env of ['dev', 'test', undefined]) {
+      const { nexted, res } = await run(mk(env).middleware(), { headers: { authorization: 'Bearer tok' } });
+      assert.equal(nexted, false, `env=${env}`);
+      assert.equal(res._s, 401);
+    }
+  } finally {
+    if (prev === undefined) delete process.env.OPERATUM_APP_ENV; else process.env.OPERATUM_APP_ENV = prev;
+  }
+});
