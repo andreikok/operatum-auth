@@ -40,6 +40,19 @@ function jwkToKeyObject(jwk) {
 }
 
 /**
+ * Canonical app environment: 'dev' | 'test' | 'main' ('prod' / 'production'
+ * alias main — the deployer's OPERATUM_APP_ENV says 'prod', the gateway's
+ * token `env` claim says 'main'), else null. Mirrors the gateway's
+ * lib/app-token-env.js canonicalTokenEnv.
+ */
+export function canonicalAppEnv(value) {
+  const v = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (v === 'main' || v === 'production' || v === 'prod') return 'main';
+  if (v === 'dev' || v === 'test') return v;
+  return null;
+}
+
+/**
  * Verify the signature + standard claims of an Operatum JWT.
  *
  * @param {string} token
@@ -51,6 +64,16 @@ function jwkToKeyObject(jwk) {
  *   expectedAudience / audiencePrefix is required.
  * @param {string} [opts.issuer='operatum']
  * @param {number} [opts.clockSkewSec=30]  - seconds of leeway on iat/exp
+ * @param {string} [opts.expectedEnv]      - when set, the token's `env` claim
+ *   must canonicalise to the same environment (dev|test|main); a token with no
+ *   env claim is refused. One build id spans dev/test/main, so the audience
+ *   alone lets a dev token open the build's test/main deployment. An
+ *   expectedEnv that is not a known environment refuses every token.
+ * @param {Array<string|undefined>} [opts.allowedPurposes] - when set, the
+ *   token's `purpose` claim must be in this list (`undefined` = a token with
+ *   no purpose). Purpose-tagged tokens (edge sessions, handoffs, app-run
+ *   delegation) are minted for one specific verifier and must not open
+ *   anything else.
  * @returns {Promise<object>} the verified payload
  */
 export async function verifyToken(token, {
@@ -59,6 +82,8 @@ export async function verifyToken(token, {
   audiencePrefix,
   issuer = 'operatum',
   clockSkewSec = 30,
+  expectedEnv,
+  allowedPurposes,
 } = {}) {
   if (!token || typeof token !== 'string') throw new TokenError('missing token', 'missing');
   if (!jwks) throw new TokenError('no JWKS configured', 'misconfigured');
@@ -109,6 +134,17 @@ export async function verifyToken(token, {
   }
   if (typeof payload.iat === 'number' && nowSec + clockSkewSec < payload.iat) {
     throw new TokenError('token issued in the future', 'not_yet_valid');
+  }
+  if (expectedEnv !== undefined && expectedEnv !== null) {
+    const want = canonicalAppEnv(expectedEnv);
+    if (!want) throw new TokenError(`unknown app environment ${expectedEnv}`, 'misconfigured');
+    if (payload.env === undefined) throw new TokenError('token has no env claim', 'env_missing');
+    if (canonicalAppEnv(payload.env) !== want) {
+      throw new TokenError(`token is for env ${payload.env}, not ${want}`, 'env_mismatch');
+    }
+  }
+  if (Array.isArray(allowedPurposes) && !allowedPurposes.includes(payload.purpose)) {
+    throw new TokenError(`token purpose ${payload.purpose} not accepted here`, 'purpose_not_allowed');
   }
 
   return payload;

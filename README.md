@@ -148,6 +148,23 @@ checks `iss = 'operatum'`, `aud === expectedAudience`, and `exp`/`iat`
 rotation is handled transparently: an unknown `kid` forces one JWKS
 refresh before the token is rejected.
 
+Two more checks apply to bearer tokens (the middleware and the handoff):
+
+- **Environment binding.** One build id spans dev, test and main, so the
+  audience alone would let a token minted for the dev deployment open the
+  same app's test or main deployment. When `appEnv` is set (default:
+  `process.env.OPERATUM_APP_ENV`, which the Operatum deployer always sets;
+  `prod`/`production` mean `main`), the token's `env` claim must name the
+  same environment. A token with no `env` claim is refused (`env_missing`),
+  a different one is refused (`env_mismatch`), and an unknown `appEnv`
+  refuses every token (`misconfigured`). With no `appEnv` at all
+  (non-platform use) the env is not checked and a warning is logged once.
+- **Purpose allow-list.** Tokens the platform minted for a different
+  verifier (edge sessions and handoffs `public_host_*`, F-6 `app_origin_*`,
+  `/app-run` `app_run_delegated`) carry a `purpose` claim and are refused
+  (`purpose_not_allowed`). Every token the platform hands a bearer app
+  carries no purpose. Override with `acceptPurposes` only if you know why.
+
 ### Token sources (first match wins)
 
 1. `Authorization: Bearer <token>` — for API calls.

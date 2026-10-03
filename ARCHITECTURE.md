@@ -107,23 +107,36 @@ published JWKS. Used when the app runs outside the reverse-proxy
 topology, or when the manifest declares `auth.mode: bearer`.
 
 - `createOperatumAuth({ jwksUri, expectedAudience, loginUrl, ... })` —
-  factory (`src/middleware.js:210`). Returns
+  factory (`src/middleware.js:234`). Returns
   `{ middleware, requirePerm, verify, jwks, mountHandoff }`
-  (`src/middleware.js:380`). Requires `jwksUri` + `expectedAudience`
-  (`src/middleware.js:218-219`).
+  (`src/middleware.js:432`). Requires `jwksUri` + `expectedAudience`
+  (`src/middleware.js:244-245`).
 - Token sources (first match wins): `Authorization: Bearer`, the
   `operatum.session` cookie, then a `?operatum_token=` query param
-  (`extractToken`, `src/middleware.js:182-189`).
+  (`extractToken`, `src/middleware.js:199-206`).
 - `verifyToken(token, { jwks, expectedAudience, issuer, clockSkewSec })`
-  — signature + claim validation (`src/jwt-verify.js:56`). RS256-only
-  (`src/jwt-verify.js:77`); requires a `kid` (`:78`); checks `iss`
-  (`:97-99`), exact `aud` (`:100-103`), and `exp`/`iat` with skew
-  (`:107-112`).
+  — signature + claim validation (`src/jwt-verify.js:79`). RS256-only
+  (`src/jwt-verify.js:102`); requires a `kid` (`:103`); checks `iss`
+  (`:122-124`), exact `aud` (`:125-128`), and `exp`/`iat` with skew
+  (`:132-137`). Two opt-in checks follow (`:138-147`):
+  `expectedEnv` (the `env` claim must canonicalise to the same
+  dev/test/main; an env-less token is refused) and `allowedPurposes`.
+- **Bearer path binding.** `createOperatumAuth` passes
+  `expectedEnv = appEnv` (default `process.env.OPERATUM_APP_ENV`, which
+  the deployer always sets; `prod`/`production` = `main`) and
+  `allowedPurposes = BEARER_PATH_PURPOSES` (`src/middleware.js:42`):
+  only purpose-less tokens. One build id spans dev/test/main, so without
+  the env check a token minted for the dev deployment opened test/main;
+  without the purpose check the platform's edge-session, handoff and
+  app-run tokens (same audience) opened a bearer app. An explicitly
+  passed invalid `appEnv` throws at construction; an invalid
+  `OPERATUM_APP_ENV` refuses every token; no env at all keeps the old
+  audience-only check and warns once.
 - `JwksCache` (`src/jwks-cache.js:19`) — fetches the configured
   `jwksUri`, caches RSA keys by `kid` for 5 min
   (`DEFAULT_MAX_AGE_MS`, `src/jwks-cache.js:16`, `:45-49`), and
   **refreshes on unknown kid** to ride through gateway key rotations
-  (`src/jwt-verify.js:80-86`, `src/jwks-cache.js:56-58`).
+  (`src/jwt-verify.js:105-111`, `src/jwks-cache.js:56-58`).
 - `TokenError` (`src/jwt-verify.js:11-17`) carries a `.code` used as the
   401 `reason`.
 
@@ -163,34 +176,34 @@ Both factories expose `middleware()` — a framework-agnostic handler that
 populates `req.operatum` then calls `next()`, or rejects. Framework
 detection (Express `req.get`/`res.status` vs. Fastify
 `req.headers`/`reply.code`) is normalised by small adapters
-(`src/middleware.js:39-72`, `src/header-mode.js:192-206`) — added after a
+(`src/middleware.js:56-89`, `src/header-mode.js:192-206`) — added after a
 Fastify crash on the Express-only `req.get('host')`
 (`src/middleware.js:9-13`).
 
 `requirePerm(perm)` gates a route on a grant in `req.operatum.perms`
-(`src/middleware.js:273-283`, `src/header-mode.js:309-319`), assuming
+(`src/middleware.js:325-335`, `src/header-mode.js:309-319`), assuming
 `middleware()` already ran. Service principals carry an empty `perms`
 array, so `requirePerm` always 403s them (`src/header-mode.js:282`).
 
-Bearer-only: `mountHandoff(app, opts?)` (`src/middleware.js:317`)
+Bearer-only: `mountHandoff(app, opts?)` (`src/middleware.js:369`)
 registers `POST /_operatum/auth/handoff`, which verifies the
 fragment-delivered token and sets an httpOnly `operatum.session` cookie
-(`src/middleware.js:336-377`) with a **transport-aware** `Secure` flag
-(`reqIsSecure`, `src/middleware.js:328-334`; applied `:359-362`). On
+(`src/middleware.js:388-429`) with a **transport-aware** `Secure` flag
+(`reqIsSecure`, `src/middleware.js:380-386`; applied `:411-414`). On
 unauthenticated browser GETs the middleware serves a bootstrap HTML that
 runs the same handoff before falling back to a `loginUrl?next=` redirect
-(`buildBootstrapHtml`, `src/middleware.js:129-171`; `denyUnauthenticated`,
+(`buildBootstrapHtml`, `src/middleware.js:146-188`; `denyUnauthenticated`,
 `:227-244`). The bootstrap serves a 200 HTML page rather than a bare 302
 to avoid racing the fragment handoff (rationale, `:104-127`). Overriding
 the bootstrap's handoff path is noted **planned/not implemented**
-(`src/middleware.js:132-135`).
+(`src/middleware.js:149-152`).
 
 ---
 
 ## `req.operatum` shape
 
 Set by header mode at `src/header-mode.js:253-265` and by bearer mode at
-`src/middleware.js:252-260`:
+`src/middleware.js:304-312`:
 
 ```js
 {
@@ -215,14 +228,14 @@ The ticket asks about a "delegation act-chain (audit-only)". **Verified
 against source: this repo has none.** A search of `src/*.js` finds no
 delegation, on-behalf-of, actor, or act-chain construct. Every
 authenticated request resolves to exactly ONE principal — either a user
-identity (`src/header-mode.js:253-265`, `src/middleware.js:252-260`) or a
+identity (`src/header-mode.js:253-265`, `src/middleware.js:304-312`) or a
 single service principal (`src/header-mode.js:275-286`) — with no
 delegating/acting party recorded on the request.
 
 The only audit-adjacent surface here is `req.operatum.raw`, which mirrors
 the parsed headers (header mode) or the decoded JWT payload (bearer mode)
 for debugging/introspection (`src/header-mode.js:261-264`,
-`src/middleware.js:259`), plus the service token's `scopes` array. Any
+`src/middleware.js:311`), plus the service token's `scopes` array. Any
 act-chain concept, if it exists on the platform, lives in the gateway
 (external repo) and is deliberately out of scope for this doc.
 
@@ -269,12 +282,12 @@ The gateway is the issuer and mints app tokens with `iss: 'operatum'` and
 `aud: operatum-app:<buildId>` (issuance is external — not verifiable from
 this repo). The app sets `expectedAudience` to
 `operatum-app:${OPERATUM_APP_ID}` and `verifyToken` requires an **exact**
-match (`src/jwt-verify.js:100-103`) — so a token minted for app A cannot
+match (`src/jwt-verify.js:125-128`) — so a token minted for app A cannot
 authenticate at app B. Service tokens instead use
 `aud: operatum-service:<name>`, matched by **prefix** because the name
-varies per token (`src/jwt-verify.js:104-106`, `src/service-mode.js:65`).
+varies per token (`src/jwt-verify.js:129-131`, `src/service-mode.js:65`).
 `verifyToken` enforces exactly one of `expectedAudience` /
-`audiencePrefix` (`src/jwt-verify.js:65-70`).
+`audiencePrefix` (`src/jwt-verify.js:90-95`).
 
 The public verification key is fetched from the configured `jwksUri`
 (the app points this at `<gateway>/.well-known/jwks.json`); only RSA keys
@@ -285,11 +298,12 @@ Rotation is handled by the unknown-kid refresh path above.
 
 Bearer/handoff `reason` codes surfaced as `401 { ok:false,
 error:'unauthenticated', reason:'<code>' }`: `no_token`
-(`src/middleware.js:249`) plus the `TokenError.code` values —
+(`src/middleware.js:301`) plus the `TokenError.code` values —
 `malformed`, `alg_mismatch`, `missing_kid`, `unknown_kid`,
-`bad_signature`, `bad_issuer`, `bad_audience`, `expired`, `not_yet_valid`
-(`src/jwt-verify.js:73-111`), and the config-time `misconfigured`
-(`:64-69`). Header mode returns a single flat reason,
+`bad_signature`, `bad_issuer`, `bad_audience`, `expired`, `not_yet_valid`,
+`env_missing`, `env_mismatch`, `purpose_not_allowed`
+(`src/jwt-verify.js:98-136`), and the config-time `misconfigured`
+(`:89-94`). Header mode returns a single flat reason,
 `missing_or_invalid_operatum_headers` (`src/header-mode.js:304`).
 
 ---
@@ -315,7 +329,7 @@ external; described here as the contract, not as verified gateway code):
   fetched via `JwksCache`
 - the JWT contract: `iss='operatum'`, RS256, `aud=operatum-app:<buildId>`
   / `operatum-service:<name>`, claims `sub`/`email`/`tenant_id`/`app_id`/
-  `role`/`perms`/`scopes` (as read at `src/middleware.js:252-260`,
+  `role`/`perms`/`scopes` (as read at `src/middleware.js:304-312`,
   `src/service-mode.js:65-93`)
 - the gateway service-token introspection endpoint for dep-token
   revocation (`introspectUrl`, `src/service-mode.js:82-86`)
