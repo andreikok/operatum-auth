@@ -176,3 +176,32 @@ test('middleware: the producer binds dep tokens to OPERATUM_APP_ENV', async () =
     if (prev === undefined) delete process.env.OPERATUM_APP_ENV; else process.env.OPERATUM_APP_ENV = prev;
   }
 });
+
+test('service mode warns ONCE when OPERATUM_APP_ENV is unset (no silent fail-open)', async () => {
+  const { _resetDepEnvWarningForTests } = await import('../src/header-mode.js');
+  const prev = process.env.OPERATUM_APP_ENV;
+  delete process.env.OPERATUM_APP_ENV;
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (...a) => { warns.push(a.join(' ')); };
+  try {
+    _resetDepEnvWarningForTests();
+    createOperatumAuthFromHeaders({ ownBuildId: B, jwks: {}, verifyImpl: okVerify() });
+    createOperatumAuthFromHeaders({ ownBuildId: B, jwks: {}, verifyImpl: okVerify() });
+    assert.equal(warns.filter((w) => /OPERATUM_APP_ENV is not set: dependency/.test(w)).length, 1);
+    // An env (opt or OPERATUM_APP_ENV) silences it.
+    _resetDepEnvWarningForTests(); warns.length = 0;
+    createOperatumAuthFromHeaders({ ownBuildId: B, jwks: {}, verifyImpl: okVerify(), ownEnv: 'dev' });
+    process.env.OPERATUM_APP_ENV = 'main';
+    createOperatumAuthFromHeaders({ ownBuildId: B, jwks: {}, verifyImpl: okVerify() });
+    assert.equal(warns.length, 0);
+    // Pure header mode (no service config) has no dep tokens to bind: no warning.
+    delete process.env.OPERATUM_APP_ENV;
+    _resetDepEnvWarningForTests();
+    createOperatumAuthFromHeaders();
+    assert.equal(warns.length, 0);
+  } finally {
+    console.warn = origWarn;
+    if (prev === undefined) delete process.env.OPERATUM_APP_ENV; else process.env.OPERATUM_APP_ENV = prev;
+  }
+});

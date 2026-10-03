@@ -405,6 +405,10 @@ export function createOperatumAuthFromHeaders(opts = {}) {
  * Returns null (→ pure header mode) when service tokens are explicitly disabled
  * or the required inputs (this app's build id + a JWKS) are absent.
  */
+let warnedNoDepEnv = false;
+/** Test hook: re-arm the one-time OPERATUM_APP_ENV warning. */
+export function _resetDepEnvWarningForTests() { warnedNoDepEnv = false; }
+
 function resolveServiceConfig(opts) {
   if (opts.enableServiceTokens === false) return null;
   const ownBuildId = opts.ownBuildId
@@ -415,12 +419,20 @@ function resolveServiceConfig(opts) {
   // Need this app's id and a way to check signatures (a JWKS URL, or an
   // injected jwks instance for tests/embedding); else fall back to header-only.
   if (!ownBuildId || (!jwksUri && !opts.jwks)) return null;
+  const ownEnv = opts.ownEnv || process.env.OPERATUM_APP_ENV || undefined;
+  if (!ownEnv && !warnedNoDepEnv) {
+    // Same posture as the bearer middleware: no silent fail-open. Without an
+    // env, dep tokens are not bound to this producer's environment.
+    warnedNoDepEnv = true;
+    // eslint-disable-next-line no-console
+    console.warn('[@operatum/auth] OPERATUM_APP_ENV is not set: dependency (service) tokens are NOT bound to this deployment\'s environment (a token minted for another env of this app is accepted). The Operatum deployer always sets it.');
+  }
   return {
     ownBuildId,
     // This producer's tenant — used to reject cross-tenant dep tokens (v1).
     ownTenantId: opts.ownTenantId || process.env.OPERATUM_TENANT_ID || null,
     // This producer's env — dep tokens are bound to it (verifyDepToken).
-    ownEnv: opts.ownEnv || process.env.OPERATUM_APP_ENV || undefined,
+    ownEnv,
     jwks: opts.jwks || new JwksCache({ jwksUri, fetchImpl: opts.fetchImpl }),
     // Revocation callback (immediate revocation). Omitting it (no gatewayUrl)
     // falls back to crypto + scope + the token's own TTL.
