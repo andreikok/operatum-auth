@@ -1,6 +1,6 @@
 export { JwksCache } from './jwks-cache.js';
-export { verifyToken, TokenError } from './jwt-verify.js';
-export { createOperatumAuth } from './middleware.js';
+export { verifyToken, TokenError, canonicalAppEnv } from './jwt-verify.js';
+export { createOperatumAuth, BEARER_PATH_PURPOSES } from './middleware.js';
 // Stage-8 reverse-proxy mode: drop-in replacement for
 // createOperatumAuth that reads identity from X-Operatum-* request
 // headers instead of verifying a JWT. Use this when the gateway

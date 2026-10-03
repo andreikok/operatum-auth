@@ -24,7 +24,24 @@
  */
 
 import { JwksCache } from './jwks-cache.js';
-import { verifyToken, TokenError } from './jwt-verify.js';
+import { verifyToken, TokenError, canonicalAppEnv } from './jwt-verify.js';
+
+/**
+ * Purposes a token may carry on the BEARER path (this middleware + its
+ * handoff). Every token the platform hands a bearer app — the /login
+ * fragment token, /api/auth/token, the delegated tool_call_app_endpoint and
+ * MCP-sidecar tokens, svc_ service-tool tokens, conformance probes — carries
+ * NO purpose. Purpose-tagged tokens are minted for one specific verifier and
+ * must not open a bearer app:
+ *   public_host_handoff / public_host_session  — the router edge's per-app host
+ *   app_origin_handoff  / app_origin_session   — the F-6 app-origin proxy
+ *   app_run_delegated                          — the /app-run proxy (MCP sidecars)
+ * An explicit allow-list (not a deny-list) so a future purpose is refused
+ * until someone decides it belongs here.
+ */
+export const BEARER_PATH_PURPOSES = Object.freeze([undefined]);
+
+let warnedNoAppEnv = false;
 
 // ── Framework adapters ────────────────────────────────────────────
 //
@@ -206,6 +223,13 @@ function wantsJson(req) {
  * @param {string} [opts.cookieName='operatum.session']
  * @param {number} [opts.clockSkewSec=30]
  * @param {typeof fetch} [opts.fetchImpl]
+ * @param {string} [opts.appEnv]            - this deployment's environment
+ *   (dev|test|main; prod/production alias main). Defaults to
+ *   process.env.OPERATUM_APP_ENV, which the Operatum deployer always sets.
+ *   When set, a token must carry the same `env` claim — a token minted for
+ *   the dev deployment never opens test/main. Unset (non-platform use) keeps
+ *   the old audience-only behaviour and logs a warning once.
+ * @param {Array<string|undefined>} [opts.acceptPurposes=BEARER_PATH_PURPOSES]
  */
 export function createOperatumAuth(opts) {
   const {
@@ -214,14 +238,31 @@ export function createOperatumAuth(opts) {
     cookieName = 'operatum.session',
     clockSkewSec = 30,
     fetchImpl,
+    appEnv = process.env.OPERATUM_APP_ENV,
+    acceptPurposes = BEARER_PATH_PURPOSES,
   } = opts || {};
   if (!jwksUri) throw new Error('createOperatumAuth: jwksUri required');
   if (!expectedAudience) throw new Error('createOperatumAuth: expectedAudience required');
 
   const jwks = new JwksCache({ jwksUri, fetchImpl });
+  // '' counts as unset. A set-but-unknown value is passed through so
+  // verifyToken refuses every token (fail closed) rather than silently
+  // dropping the env check.
+  const expectedEnv = typeof appEnv === 'string' && appEnv.trim() ? appEnv : undefined;
+  if (expectedEnv !== undefined && !canonicalAppEnv(expectedEnv)) {
+    // eslint-disable-next-line no-console
+    console.error(`[@operatum/auth] OPERATUM_APP_ENV=${JSON.stringify(expectedEnv)} is not dev|test|main|prod — every token will be refused`);
+  }
+  if (expectedEnv === undefined && !warnedNoAppEnv) {
+    warnedNoAppEnv = true;
+    // eslint-disable-next-line no-console
+    console.warn('[@operatum/auth] OPERATUM_APP_ENV is not set: tokens are NOT bound to this deployment\'s environment (a token for another env of the same app is accepted). The Operatum deployer always sets it.');
+  }
 
   async function verify(token) {
-    return verifyToken(token, { jwks, expectedAudience, issuer, clockSkewSec });
+    return verifyToken(token, {
+      jwks, expectedAudience, issuer, clockSkewSec, expectedEnv, allowedPurposes: acceptPurposes,
+    });
   }
 
   function denyUnauthenticated(req, res, reason) {
